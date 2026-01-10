@@ -163,9 +163,9 @@ def save_config(config: Config):
 
 
 def get_uk_holidays(year: int) -> dict[date, str]:
-    """Get UK bank holidays for a given year."""
+    """Get England bank holidays for a given year."""
     import holidays
-    uk_holidays = holidays.UK(years=year)
+    uk_holidays = holidays.UK(years=year, subdiv='ENG')
     return {d: name for d, name in uk_holidays.items()}
 
 
