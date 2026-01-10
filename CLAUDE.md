@@ -73,7 +73,18 @@ Quick adjust shortcuts (L/S/T) will prompt for confirmation if the day already h
 - Month picker modal (`action_select_month` is TODO)
 - Reports feature for invoicing
 
-## Linting
+## Code Quality
+
+Run these checks before committing:
+
+```bash
+ruff check *.py          # Linting
+pyright *.py             # Type checking
+```
+
+Both must pass with zero errors.
+
+### Markdown
 
 - Markdown files must pass `markdownlint`
 
