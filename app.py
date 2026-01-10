@@ -42,7 +42,7 @@ class TimesheetApp(App):
         color: $text;
     }
 
-    #week-earnings {
+    #week-earnings, #month-earnings, #year-earnings {
         height: auto;
         padding: 0 2;
         color: $text;
@@ -207,10 +207,12 @@ class TimesheetApp(App):
         # Month view widgets (hidden by default)
         yield Static(id="month-header", classes="hidden")
         yield Container(DataTable(id="month-table"), id="month-table-container", classes="hidden")
+        yield Static(id="month-earnings", classes="hidden")
         yield Static(id="month-summary", classes="hidden")
         # Year view widgets (hidden by default)
         yield Static(id="year-header", classes="hidden")
         yield Container(DataTable(id="year-table"), id="year-table-container", classes="hidden")
+        yield Static(id="year-earnings", classes="hidden")
         yield Static(id="year-summary", classes="hidden")
         yield Footer()
 
@@ -613,12 +615,21 @@ class TimesheetApp(App):
 
         text.append(f"                                              TOTAL  {float(month_total):>6g}h      ({round(total_days, 2):>5g}d)")
 
+        month_summary.update(text)
+
+        # Update earnings display (between table and summary)
+        month_earnings = self.query_one("#month-earnings", Static)
         if self.show_money:
+            month_earnings.remove_class("hidden")
             month_billable = month_worked * config.hourly_rate
             month_with_vat = month_billable * (1 + config.vat_rate)
-            text.append(f"\n                                           Billable  £{float(month_billable):>,.2f}      (£{float(month_with_vat):,.2f} inc VAT)")
-
-        month_summary.update(text)
+            amount_str = f"£{float(month_billable):,.2f}"
+            vat_str = f"£{float(month_with_vat):,.2f}"
+            earnings_text = Text()
+            earnings_text.append(f"                                           Billable  {amount_str:>10}   ({vat_str} inc VAT)")
+            month_earnings.update(earnings_text)
+        else:
+            month_earnings.add_class("hidden")
 
     def _get_month_totals(self, year: int, month: int) -> dict:
         """Calculate totals for a month."""
@@ -788,12 +799,21 @@ class TimesheetApp(App):
 
         text.append(f"                                              TOTAL  {total_days:>6g}d")
 
+        year_summary.update(text)
+
+        # Update earnings display (between table and summary)
+        year_earnings = self.query_one("#year-earnings", Static)
         if self.show_money:
+            year_earnings.remove_class("hidden")
             year_billable = year_worked * config.hourly_rate
             year_with_vat = year_billable * (1 + config.vat_rate)
-            text.append(f"\n                                           Billable  £{float(year_billable):>,.2f}      (£{float(year_with_vat):,.2f} inc VAT)")
-
-        year_summary.update(text)
+            amount_str = f"£{float(year_billable):,.2f}"
+            vat_str = f"£{float(year_with_vat):,.2f}"
+            earnings_text = Text()
+            earnings_text.append(f"                                           Billable  {amount_str:>10}   ({vat_str} inc VAT)")
+            year_earnings.update(earnings_text)
+        else:
+            year_earnings.add_class("hidden")
 
     def _set_view_mode(self, mode: str):
         """Switch between view modes and toggle widget visibility."""
@@ -802,9 +822,9 @@ class TimesheetApp(App):
         # Week view widgets
         week_widgets = ["#combined-header", "#week-table-container", "#week-earnings", "#weekly-summary"]
         # Month view widgets
-        month_widgets = ["#month-header", "#month-table-container", "#month-summary"]
+        month_widgets = ["#month-header", "#month-table-container", "#month-earnings", "#month-summary"]
         # Year view widgets
-        year_widgets = ["#year-header", "#year-table-container", "#year-summary"]
+        year_widgets = ["#year-header", "#year-table-container", "#year-earnings", "#year-summary"]
 
         for widget_id in week_widgets:
             widget = self.query_one(widget_id)
