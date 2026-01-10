@@ -204,7 +204,7 @@ class EditDayScreen(ModalScreen[TimeEntry | None]):
         adjustment = timedelta(hours=float(adj_val)) if adj_val else None
 
         adjust_type_val = self.query_one("#adjust-type", Select).value
-        adjust_type = adjust_type_val if adjust_type_val else None
+        adjust_type = str(adjust_type_val) if isinstance(adjust_type_val, str) and adjust_type_val else None
         comment = self.query_one("#comment", Input).value.strip() or None
 
         # Validate: adjustment requires a type

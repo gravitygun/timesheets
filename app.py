@@ -1137,7 +1137,7 @@ class TimesheetApp(App):
         entry = self._get_or_create_entry(selected_date)
         config = storage.get_config()
 
-        def do_apply(confirmed: bool = True) -> None:
+        def do_apply(confirmed: bool | None = True) -> None:
             if not confirmed:
                 return
             new_entry = TimeEntry(

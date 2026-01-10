@@ -59,10 +59,10 @@ class CombinedHeader(Static):
 
         # Check if click is on left arrow (◄)
         if self.left_arrow_pos <= click_col < self.left_arrow_pos + 2:
-            self.app.action_prev_week()
+            self.app.action_prev_week()  # type: ignore[attr-defined]
         # Check if click is on right arrow (►)
         elif self.right_arrow_pos <= click_col < self.right_arrow_pos + 2:
-            self.app.action_next_week()
+            self.app.action_next_week()  # type: ignore[attr-defined]
 
 
 class WeeklySummary(Static):
