@@ -408,8 +408,11 @@ class TimesheetApp(App):
             billable_amount = billable_hours * config.hourly_rate
             vat_amount = billable_amount * config.vat_rate
             total_with_vat = billable_amount + vat_amount
+            # Format amount to fixed width for alignment with summary below
+            amount_str = f"£{float(billable_amount):,.2f}"
+            vat_str = f"£{float(total_with_vat):,.2f}"
             text = Text()
-            text.append(f"                                           Billable  £{float(billable_amount):,.2f}      (£{float(total_with_vat):,.2f} inc VAT)")
+            text.append(f"                                           Billable  {amount_str:>10}   ({vat_str} inc VAT)")
             week_earnings.update(text)
         else:
             week_earnings.add_class("hidden")
