@@ -145,6 +145,8 @@ def get_config() -> Config:
             config.currency = row["value"]
         elif row["key"] == "standard_day_hours":
             config.standard_day_hours = Decimal(row["value"])
+        elif row["key"] == "vat_rate":
+            config.vat_rate = Decimal(row["value"])
 
     return config
 
@@ -158,6 +160,8 @@ def save_config(config: Config):
                  ("currency", config.currency))
     conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
                  ("standard_day_hours", str(config.standard_day_hours)))
+    conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                 ("vat_rate", str(config.vat_rate)))
     conn.commit()
     conn.close()
 

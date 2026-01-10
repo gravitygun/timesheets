@@ -42,6 +42,13 @@ class TimesheetApp(App):
         color: $text;
     }
 
+    #week-earnings {
+        height: auto;
+        padding: 0 2;
+        color: $text;
+        text-style: bold;
+    }
+
     #week-table {
         height: 1fr;
         margin: 1 2;
@@ -141,6 +148,9 @@ class TimesheetApp(App):
         # Track last selected date in week view for restoring selection
         self.last_selected_date: date | None = None
 
+        # Privacy mode: hide earnings by default
+        self.show_money = False
+
     def _find_week_for_date(self, d: date) -> int:
         """Find which week index contains the given date."""
         for i, (start, end) in enumerate(self.weeks):
@@ -192,6 +202,7 @@ class TimesheetApp(App):
         # Week view widgets
         yield CombinedHeader(self.current_year, self.current_month, id="combined-header")
         yield Container(DataTable(id="week-table"), id="week-table-container")
+        yield Static(id="week-earnings", classes="hidden")
         yield WeeklySummary(id="weekly-summary")
         # Month view widgets (hidden by default)
         yield Static(id="month-header", classes="hidden")
@@ -255,6 +266,41 @@ class TimesheetApp(App):
         table.add_column("T", width=6)
         table.add_column("P", width=6)
         table.add_column("Total", width=8)
+        if self.show_money:
+            table.add_column("Bill", width=10)
+            table.add_column("+VAT", width=10)
+
+    def _rebuild_tables(self):
+        """Rebuild table columns when show_money changes."""
+        # Rebuild month table
+        month_table = self.query_one("#month-table", DataTable)
+        month_table.clear(columns=True)
+        month_table.add_column("W/C Mon", width=12)
+        month_table.add_column("Worked", width=8)
+        month_table.add_column("Poss", width=8)
+        month_table.add_column("L", width=6)
+        month_table.add_column("S", width=6)
+        month_table.add_column("T", width=6)
+        month_table.add_column("P", width=6)
+        month_table.add_column("Total", width=8)
+        if self.show_money:
+            month_table.add_column("Bill", width=10)
+            month_table.add_column("+VAT", width=10)
+
+        # Rebuild year table
+        year_table = self.query_one("#year-table", DataTable)
+        year_table.clear(columns=True)
+        year_table.add_column("Month", width=12)
+        year_table.add_column("Worked", width=8)
+        year_table.add_column("Poss", width=8)
+        year_table.add_column("L", width=6)
+        year_table.add_column("S", width=6)
+        year_table.add_column("T", width=6)
+        year_table.add_column("P", width=6)
+        year_table.add_column("Total", width=8)
+        if self.show_money:
+            year_table.add_column("Bill", width=10)
+            year_table.add_column("+VAT", width=10)
 
     def _load_month_data(self):
         """Load all entries for current month into memory."""
@@ -352,6 +398,21 @@ class TimesheetApp(App):
             week_public_holiday,
             config
         )
+
+        # Update earnings display
+        week_earnings = self.query_one("#week-earnings", Static)
+        if self.show_money:
+            week_earnings.remove_class("hidden")
+            # Billable = worked hours only (not leave/sick/training/P/H)
+            billable_hours = week_worked
+            billable_amount = billable_hours * config.hourly_rate
+            vat_amount = billable_amount * config.vat_rate
+            total_with_vat = billable_amount + vat_amount
+            text = Text()
+            text.append(f"                                           Billable  £{float(billable_amount):,.2f}      (£{float(total_with_vat):,.2f} inc VAT)")
+            week_earnings.update(text)
+        else:
+            week_earnings.add_class("hidden")
 
         # Update table
         table = self.query_one("#week-table", DataTable)
@@ -490,7 +551,7 @@ class TimesheetApp(App):
             else:
                 style = ""
 
-            table.add_row(
+            row_data = [
                 Text(wc_str, style=style),
                 Text(f"{float(totals['worked']):g}h" if totals['worked'] else "-", style=style),
                 Text(f"{float(totals['max_hours']):g}h" if totals['max_hours'] else "-", style=style),
@@ -499,8 +560,15 @@ class TimesheetApp(App):
                 Text(f"{float(totals['training']):g}h" if totals['training'] else "-", style=style),
                 Text(f"{float(totals['public_holiday']):g}h" if totals['public_holiday'] else "-", style=style),
                 Text(f"{float(totals['total']):g}h" if totals['total'] else "-", style=style),
-                key=f"{week_start.isoformat()}",
-            )
+            ]
+
+            if self.show_money:
+                billable = totals['worked'] * config.hourly_rate
+                with_vat = billable * (1 + config.vat_rate)
+                row_data.append(Text(f"£{float(billable):,.0f}" if billable else "-", style=style))
+                row_data.append(Text(f"£{float(with_vat):,.0f}" if with_vat else "-", style=style))
+
+            table.add_row(*row_data, key=f"{week_start.isoformat()}")
 
             # Accumulate month totals
             month_worked += totals["worked"]
@@ -541,6 +609,11 @@ class TimesheetApp(App):
         text.append(ph_line, style="dim" if month_ph == 0 else "")
 
         text.append(f"                                              TOTAL  {float(month_total):>6g}h      ({round(total_days, 2):>5g}d)")
+
+        if self.show_money:
+            month_billable = month_worked * config.hourly_rate
+            month_with_vat = month_billable * (1 + config.vat_rate)
+            text.append(f"\n                                           Billable  £{float(month_billable):>,.2f}      (£{float(month_with_vat):,.2f} inc VAT)")
 
         month_summary.update(text)
 
@@ -655,7 +728,7 @@ class TimesheetApp(App):
             else:
                 style = ""
 
-            table.add_row(
+            row_data = [
                 Text(month_name, style=style),
                 Text(f"{worked_d:g}d" if worked_d else "-", style=style),
                 Text(f"{max_d:g}d" if max_d else "-", style=style),
@@ -664,8 +737,15 @@ class TimesheetApp(App):
                 Text(f"{training_d:g}d" if training_d else "-", style=style),
                 Text(f"{ph_d:g}d" if ph_d else "-", style=style),
                 Text(f"{total_d:g}d" if total_d else "-", style=style),
-                key=f"{year}-{month:02d}",
-            )
+            ]
+
+            if self.show_money:
+                billable = totals['worked'] * config.hourly_rate
+                with_vat = billable * (1 + config.vat_rate)
+                row_data.append(Text(f"£{float(billable):,.0f}" if billable else "-", style=style))
+                row_data.append(Text(f"£{float(with_vat):,.0f}" if with_vat else "-", style=style))
+
+            table.add_row(*row_data, key=f"{year}-{month:02d}")
 
             # Accumulate year totals
             year_worked += totals["worked"]
@@ -705,6 +785,11 @@ class TimesheetApp(App):
 
         text.append(f"                                              TOTAL  {total_days:>6g}d")
 
+        if self.show_money:
+            year_billable = year_worked * config.hourly_rate
+            year_with_vat = year_billable * (1 + config.vat_rate)
+            text.append(f"\n                                           Billable  £{float(year_billable):>,.2f}      (£{float(year_with_vat):,.2f} inc VAT)")
+
         year_summary.update(text)
 
     def _set_view_mode(self, mode: str):
@@ -712,7 +797,7 @@ class TimesheetApp(App):
         self.view_mode = mode
 
         # Week view widgets
-        week_widgets = ["#combined-header", "#week-table-container", "#weekly-summary"]
+        week_widgets = ["#combined-header", "#week-table-container", "#week-earnings", "#weekly-summary"]
         # Month view widgets
         month_widgets = ["#month-header", "#month-table-container", "#month-summary"]
         # Year view widgets
@@ -880,8 +965,11 @@ class TimesheetApp(App):
         table.action_cursor_down()
 
     def action_toggle_money(self):
-        # TODO: Implement earnings display toggle for new layout
-        pass
+        """Toggle display of billable amounts."""
+        self.show_money = not self.show_money
+        # Rebuild tables with new column structure
+        self._rebuild_tables()
+        self._refresh_display()
 
     def action_goto_today(self):
         today = date.today()

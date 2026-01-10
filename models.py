@@ -47,3 +47,4 @@ class Config:
     hourly_rate: Decimal = Decimal("97")
     currency: str = "GBP"
     standard_day_hours: Decimal = Decimal("7.5")
+    vat_rate: Decimal = Decimal("0.20")
