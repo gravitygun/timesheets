@@ -59,11 +59,22 @@ This allows syncing via cloud storage (iCloud, Dropbox, etc.).
    python app.py
    ```
 
+### Checking Sync Status
+
+Before switching machines, verify the database is in sync:
+
+```bash
+python app.py --db-info
+```
+
+This shows the database path, last modified time, and size. Compare timestamps
+across machines to confirm sync completed.
+
 ### Important Notes
 
 - **Never run the app on both machines simultaneously** - SQLite doesn't handle
   concurrent access from different machines well
-- Wait for cloud sync to complete before switching machines
+- Wait for cloud sync to complete before switching machines (use `--db-info` to verify)
 - The app creates the database automatically if it doesn't exist
 
 ## Key Design Decisions

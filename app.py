@@ -1299,6 +1299,20 @@ class TimesheetApp(App):
         self._apply_quick_adjust("T", "Training")
 
 def main():
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--db-info":
+        from datetime import datetime
+        db_path = storage.DB_PATH
+        print(f"Database: {db_path}")
+        if db_path.exists():
+            mtime = datetime.fromtimestamp(db_path.stat().st_mtime)
+            size = db_path.stat().st_size
+            print(f"Modified: {mtime.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"Size: {size:,} bytes")
+        else:
+            print("Status: Does not exist (will be created on first run)")
+        return
+
     app = TimesheetApp()
     app.run()
 
