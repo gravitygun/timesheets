@@ -21,3 +21,6 @@ spreadsheet_structure.json
 
 # OS
 .DS_Store
+
+# Local setup notes
+git-setup.md
