@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import date, time, timedelta
 from decimal import Decimal
@@ -8,7 +9,14 @@ from pathlib import Path
 from models import TimeEntry, Config
 
 
-DB_PATH = Path(__file__).parent / "data" / "timesheet.db"
+def _get_db_path() -> Path:
+    """Get database path from environment variable or default location."""
+    if env_path := os.environ.get("TIMESHEET_DB"):
+        return Path(env_path)
+    return Path(__file__).parent / "data" / "timesheet.db"
+
+
+DB_PATH = _get_db_path()
 
 
 def get_connection() -> sqlite3.Connection:

@@ -9,6 +9,63 @@ source venv/bin/activate
 python app.py
 ```
 
+## Multi-Machine Setup
+
+The database location can be overridden with the `TIMESHEET_DB` environment variable.
+This allows syncing via cloud storage (iCloud, Dropbox, etc.).
+
+### Personal Machine Setup
+
+1. Move existing database to iCloud (or other sync folder):
+
+   ```bash
+   mkdir -p ~/Library/Mobile\ Documents/com~apple~CloudDocs/timesheets
+   mv data/timesheet.db ~/Library/Mobile\ Documents/com~apple~CloudDocs/timesheets/
+   ```
+
+2. Add to shell profile (`~/.zshrc` or `~/.bashrc`):
+
+   ```bash
+   export TIMESHEET_DB="$HOME/Library/Mobile Documents/com~apple~CloudDocs/timesheets/timesheet.db"
+   ```
+
+### Work Laptop Setup
+
+1. Clone the repository:
+
+   ```bash
+   git clone <repo-url> ~/Projects/timesheets
+   cd ~/Projects/timesheets
+   ```
+
+2. Create virtual environment and install dependencies:
+
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install textual holidays
+   ```
+
+3. Point to synced database (add to `~/.zshrc`):
+
+   ```bash
+   export TIMESHEET_DB="$HOME/Library/Mobile Documents/com~apple~CloudDocs/timesheets/timesheet.db"
+   ```
+
+4. Run the app:
+
+   ```bash
+   source venv/bin/activate
+   python app.py
+   ```
+
+### Important Notes
+
+- **Never run the app on both machines simultaneously** - SQLite doesn't handle
+  concurrent access from different machines well
+- Wait for cloud sync to complete before switching machines
+- The app creates the database automatically if it doesn't exist
+
 ## Key Design Decisions
 
 ### Week Structure
