@@ -177,3 +177,5 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 - `docs:` documentation only
 - `style:` formatting, missing semicolons, etc.
 - `chore:` maintenance tasks
+
+**Note:** Do not add `Co-Authored-By` or other AI credits to commit messages.
