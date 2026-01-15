@@ -1218,6 +1218,9 @@ class TimesheetApp(App):
             if event.row_key:
                 selected_date = date.fromisoformat(str(event.row_key.value))
                 entry = self._get_or_create_entry(selected_date)
+                # Store current row for advancing after edit
+                table = self.query_one("#week-table", DataTable)
+                self._edit_row = table.cursor_row
                 self.push_screen(EditDayScreen(entry), self._on_edit_complete)
 
     def action_populate_holidays(self):
@@ -1257,11 +1260,14 @@ class TimesheetApp(App):
         if self.view_mode != "week":
             return
         table = self.query_one("#week-table", DataTable)
-        row_key = table.coordinate_to_cell_key(Coordinate(table.cursor_row, 0)).row_key
+        current_row = table.cursor_row
+        row_key = table.coordinate_to_cell_key(Coordinate(current_row, 0)).row_key
 
         if row_key:
             selected_date = date.fromisoformat(str(row_key.value))
             entry = self._get_or_create_entry(selected_date)
+            # Store current row for advancing after edit
+            self._edit_row = current_row
             self.push_screen(EditDayScreen(entry), self._on_edit_complete)
 
     def _on_edit_complete(self, result: TimeEntry | None) -> None:
@@ -1270,6 +1276,13 @@ class TimesheetApp(App):
             storage.save_entry(result)
             self.entries[result.date] = result
             self._refresh_display()
+
+        # Move to next row (or stay on last row)
+        table = self.query_one("#week-table", DataTable)
+        if hasattr(self, '_edit_row'):
+            next_row = min(self._edit_row + 1, 6)  # 7 rows (0-6)
+            table.move_cursor(row=next_row)
+            del self._edit_row
 
     def _get_selected_date(self) -> date | None:
         """Get the currently selected date from the table."""
