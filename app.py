@@ -1377,6 +1377,10 @@ class TimesheetApp(App):
             self.notify("Nothing to cut")
             return
 
+        # Remember cursor position
+        table = self.query_one("#week-table", DataTable)
+        current_row = table.cursor_row
+
         # Copy to clipboard
         self._day_clipboard = entry
 
@@ -1394,6 +1398,9 @@ class TimesheetApp(App):
         storage.save_entry(cleared)
         self.entries[cleared.date] = cleared
         self._refresh_display()
+
+        # Restore cursor position
+        table.move_cursor(row=current_row)
         self.notify(f"Cut {entry.date.strftime('%b %d')}")
 
     def action_copy_day(self) -> None:
@@ -1428,6 +1435,10 @@ class TimesheetApp(App):
         def do_paste(confirmed: bool | None) -> None:
             if not confirmed:
                 return
+            # Remember cursor position
+            table = self.query_one("#week-table", DataTable)
+            current_row = table.cursor_row
+
             # Create new entry with clipboard data but target date
             pasted = TimeEntry(
                 date=target.date,
@@ -1442,6 +1453,9 @@ class TimesheetApp(App):
             storage.save_entry(pasted)
             self.entries[pasted.date] = pasted
             self._refresh_display()
+
+            # Restore cursor position
+            table.move_cursor(row=current_row)
             self.notify(f"Pasted to {target.date.strftime('%b %d')}")
 
         if self._entry_is_blank(target):
