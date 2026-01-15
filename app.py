@@ -125,6 +125,7 @@ class TimesheetApp(App):
         Binding("ctrl+x", "cut_day", "Cut", show=False),
         Binding("ctrl+c", "copy_day", "Copy", show=False),
         Binding("ctrl+v", "paste_day", "Paste", show=False),
+        Binding("question_mark", "toggle_help", "?", show=False),
     ]
 
     def __init__(self):
@@ -1047,6 +1048,11 @@ class TimesheetApp(App):
         # Rebuild tables with new column structure
         self._rebuild_tables()
         self._refresh_display()
+
+    def action_toggle_help(self):
+        """Toggle display of keyboard shortcuts panel."""
+        # Uses built-in Textual help panel
+        self.action_show_help_panel()
 
     def action_goto_today(self):
         today = date.today()
