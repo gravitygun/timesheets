@@ -6,7 +6,7 @@ converted from an Excel spreadsheet.
 ## Running the App
 
 ```bash
-source venv/bin/activate
+source .venv/bin/activate
 python app.py
 ```
 
