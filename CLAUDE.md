@@ -89,7 +89,7 @@ timestamps across machines to confirm sync completed.
 - Boundary weeks (e.g., Dec 27 - Jan 2) appear in both adjacent months' views
 - Days from adjacent months are shown in parentheses, e.g., `(Dec 27)`
 
-### Navigation Behavior
+### Navigation Behaviour
 
 - LEFT/RIGHT moves through weeks within current month
 - Going past week 1 (left) or last week (right) switches to adjacent month
@@ -153,6 +153,14 @@ day already has data.
 - Reports feature for invoicing
 
 ## Code Quality
+
+### Language
+
+- Use British English spellings (e.g., colour, behaviour, initialise)
+- Exception: code identifiers follow library/API conventions (e.g., `color`
+  in CSS)
+
+### Checks
 
 Run these checks before committing:
 

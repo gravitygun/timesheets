@@ -131,7 +131,7 @@ def import_from_json(json_path: Path):
     with open(json_path) as f:
         data = json.load(f)
 
-    # Initialize database
+    # Initialise database
     storage.init_db()
 
     # Import config

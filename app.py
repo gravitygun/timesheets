@@ -373,7 +373,7 @@ class TimesheetApp(App):
             entry = self._get_or_create_entry(d)
             week_worked += entry.worked_hours
 
-            # Categorize adjustments by type
+            # Categorise adjustments by type
             if entry.adjusted_hours:
                 if entry.adjust_type == "L":
                     week_leave += entry.adjusted_hours
