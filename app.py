@@ -158,6 +158,9 @@ class TimesheetApp(App):
         # Clipboard for cut/copy/paste
         self._day_clipboard: TimeEntry | None = None
 
+        # Help panel state
+        self._help_panel_visible = False
+
     def _find_week_for_date(self, d: date) -> int:
         """Find which week index contains the given date."""
         for i, (start, end) in enumerate(self.weeks):
@@ -1051,8 +1054,12 @@ class TimesheetApp(App):
 
     def action_toggle_help(self):
         """Toggle display of keyboard shortcuts panel."""
-        # Uses built-in Textual help panel
-        self.action_show_help_panel()
+        # Toggle built-in Textual help panel
+        if self._help_panel_visible:
+            self.action_hide_help_panel()
+        else:
+            self.action_show_help_panel()
+        self._help_panel_visible = not self._help_panel_visible
 
     def action_goto_today(self):
         today = date.today()
