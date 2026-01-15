@@ -1,6 +1,7 @@
 # Timesheet TUI App
 
-A Textual-based terminal UI application for tracking work hours, converted from an Excel spreadsheet.
+A Textual-based terminal UI application for tracking work hours,
+converted from an Excel spreadsheet.
 
 ## Running the App
 
@@ -11,8 +12,9 @@ python app.py
 
 ## Multi-Machine Setup
 
-The database location can be overridden with the `TIMESHEET_DB` environment variable.
-This allows syncing via cloud storage (iCloud, Dropbox, etc.).
+The database location can be overridden with the `TIMESHEET_DB`
+environment variable. This allows syncing via cloud storage
+(iCloud, Dropbox, etc.).
 
 ### Personal Machine Setup
 
@@ -67,31 +69,36 @@ Before switching machines, verify the database is in sync:
 python app.py --db-info
 ```
 
-This shows the database path, last modified time, and size. Compare timestamps
-across machines to confirm sync completed.
+This shows the database path, last modified time, and size. Compare
+timestamps across machines to confirm sync completed.
 
 ### Important Notes
 
-- **Never run the app on both machines simultaneously** - SQLite doesn't handle
-  concurrent access from different machines well
-- Wait for cloud sync to complete before switching machines (use `--db-info` to verify)
+- **Never run the app on both machines simultaneously** - SQLite
+  doesn't handle concurrent access from different machines well
+- Wait for cloud sync to complete before switching machines
+  (use `--db-info` to verify)
 - The app creates the database automatically if it doesn't exist
 
 ## Key Design Decisions
 
 ### Week Structure
+
 - **Weeks start on Saturday** (for billing purposes, not Monday)
 - Billing boundary is calendar month working days
 - Boundary weeks (e.g., Dec 27 - Jan 2) appear in both adjacent months' views
 - Days from adjacent months are shown in parentheses, e.g., `(Dec 27)`
 
 ### Navigation Behavior
+
 - LEFT/RIGHT moves through weeks within current month
 - Going past week 1 (left) or last week (right) switches to adjacent month
-- Months only change at explicit boundaries - no auto-switching based on weekday majority
+- Months only change at explicit boundaries - no auto-switching based
+  on weekday majority
 - This allows editing boundary week days in context of either month
 
 ### Adjust Types
+
 - `P` = Public Holiday
 - `L` = Leave
 - `S` = Sick
@@ -99,34 +106,38 @@ across machines to confirm sync completed.
 - Adjustment hours require a type (validation enforced)
 
 ### Display
+
 - Weekend rows (Sat/Sun) are dimmed
 - Privacy mode: earnings hidden by default, toggle with `$` key
 - Currency is GBP, hourly rate is £97
 - Standard working day is 7.5 hours (configurable in Config)
 
 ### Max Hours Calculation
-```
+
+```text
 max_hours = (weekdays × 7.5h) - public_holiday_adjustment_hours
 ```
+
 Only `P` type adjustments reduce max hours.
 
 ## Key Bindings
 
-| Key | Action |
-|-----|--------|
-| `q` | Quit |
-| `←/→` | Navigate weeks |
-| `↑/↓` | Navigate rows |
-| `m` | Month picker (TODO) |
-| `t` | Jump to today |
-| `$` | Toggle earnings display |
-| `e` or `Enter` | Edit selected day |
-| `h` | Populate UK bank holidays |
-| `L` | Quick add Leave (7.5h) |
-| `S` | Quick add Sick (7.5h) |
-| `T` | Quick add Training (7.5h) |
+| Key           | Action                    |
+| ------------- | ------------------------- |
+| `q`           | Quit                      |
+| `←/→`         | Navigate weeks            |
+| `↑/↓`         | Navigate rows             |
+| `m`           | Month picker (TODO)       |
+| `t`           | Jump to today             |
+| `$`           | Toggle earnings display   |
+| `e` or `Enter`| Edit selected day         |
+| `h`           | Populate UK bank holidays |
+| `L`           | Quick add Leave (7.5h)    |
+| `S`           | Quick add Sick (7.5h)     |
+| `T`           | Quick add Training (7.5h) |
 
-Quick adjust shortcuts (L/S/T) will prompt for confirmation if the day already has data.
+Quick adjust shortcuts (L/S/T) will prompt for confirmation if the
+day already has data.
 
 ## Files
 
