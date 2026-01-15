@@ -87,7 +87,7 @@ class WeeklySummary(Static):
         # Worked and target max are never dimmed
         text.append(f"                                             Worked  {float(worked):>6g}h      ({round(worked_days, 2):>5g}d)\n")
         pct = (float(worked) / float(max_hours) * 100) if max_hours else 0
-        text.append(f"                                    of target max  {float(max_hours):>6g}h      ({round(max_days, 2):>5g}d)   ({pct:.1f}%)\n")
+        text.append(f"                                      of target max  {float(max_hours):>6g}h      ({round(max_days, 2):>5g}d)   ({pct:.1f}%)\n")
 
         # Leave - dim if zero
         leave_line = f"                                              Leave  {float(leave):>6g}h      ({round(leave_days, 2):>5g}d)\n"

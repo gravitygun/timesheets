@@ -606,7 +606,7 @@ class TimesheetApp(App):
 
         text.append(f"                                             Worked  {float(month_worked):>6g}h      ({round(worked_days, 2):>5g}d)\n")
         pct = (float(month_worked) / float(month_max) * 100) if month_max else 0
-        text.append(f"                                    of target max  {float(month_max):>6g}h      ({round(max_days, 2):>5g}d)   ({pct:.1f}%)\n")
+        text.append(f"                                      of target max  {float(month_max):>6g}h      ({round(max_days, 2):>5g}d)   ({pct:.1f}%)\n")
 
         # Show "of target max to date" only for current month
         today = date.today()
@@ -615,7 +615,7 @@ class TimesheetApp(App):
             max_to_date = self._get_max_hours_to_date(month_start, today)
             max_to_date_days = float(max_to_date) / std_day if max_to_date else 0
             pct_to_date = (float(month_worked) / float(max_to_date) * 100) if max_to_date else 0
-            text.append(f"                            of target max to date  {float(max_to_date):>6g}h      ({round(max_to_date_days, 2):>5g}d)   ({pct_to_date:.1f}%)\n")
+            text.append(f"                              of target max to date  {float(max_to_date):>6g}h      ({round(max_to_date_days, 2):>5g}d)   ({pct_to_date:.1f}%)\n")
 
         leave_line = f"                                              Leave  {float(month_leave):>6g}h      ({round(leave_days, 2):>5g}d)\n"
         text.append(leave_line, style="dim" if month_leave == 0 else "")
@@ -824,7 +824,7 @@ class TimesheetApp(App):
 
         text.append(f"                                             Worked  {worked_days:>6g}d\n")
         pct = (worked_days / max_days * 100) if max_days else 0
-        text.append(f"                                    of target max  {max_days:>6g}d   ({pct:.1f}%)\n")
+        text.append(f"                                      of target max  {max_days:>6g}d   ({pct:.1f}%)\n")
 
         # Show "of target max to date" only for current company year
         today = date.today()
@@ -837,7 +837,7 @@ class TimesheetApp(App):
             max_to_date = self._get_max_hours_to_date(year_start, today)
             max_to_date_days = round(float(max_to_date) / std_day, 2) if max_to_date else 0
             pct_to_date = (worked_days / max_to_date_days * 100) if max_to_date_days else 0
-            text.append(f"                            of target max to date  {max_to_date_days:>6g}d   ({pct_to_date:.1f}%)\n")
+            text.append(f"                              of target max to date  {max_to_date_days:>6g}d   ({pct_to_date:.1f}%)\n")
 
         leave_line = f"                                              Leave  {leave_days:>6g}d\n"
         text.append(leave_line, style="dim" if year_leave == 0 else "")
