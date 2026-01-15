@@ -122,6 +122,9 @@ class TimesheetApp(App):
         Binding("L", "quick_leave", "Leave", show=False),
         Binding("S", "quick_sick", "Sick", show=False),
         Binding("T", "quick_training", "Training", show=False),
+        Binding("ctrl+x", "cut_day", "Cut", show=False),
+        Binding("ctrl+c", "copy_day", "Copy", show=False),
+        Binding("ctrl+v", "paste_day", "Paste", show=False),
     ]
 
     def __init__(self):
@@ -150,6 +153,9 @@ class TimesheetApp(App):
 
         # Privacy mode: hide earnings by default
         self.show_money = False
+
+        # Clipboard for cut/copy/paste
+        self._day_clipboard: TimeEntry | None = None
 
     def _find_week_for_date(self, d: date) -> int:
         """Find which week index contains the given date."""
@@ -1358,6 +1364,94 @@ class TimesheetApp(App):
     def action_quick_training(self) -> None:
         """Quick add training day."""
         self._apply_quick_adjust("T", "Training")
+
+    def action_cut_day(self) -> None:
+        """Cut the selected day (copy to clipboard and clear)."""
+        if self.view_mode != "week":
+            return
+        selected_date = self._get_selected_date()
+        if not selected_date:
+            return
+        entry = self.entries.get(selected_date)
+        if not entry or self._entry_is_blank(entry):
+            self.notify("Nothing to cut")
+            return
+
+        # Copy to clipboard
+        self._day_clipboard = entry
+
+        # Clear the entry
+        cleared = TimeEntry(
+            date=entry.date,
+            day_of_week=entry.day_of_week,
+            clock_in=None,
+            lunch_duration=None,
+            clock_out=None,
+            adjustment=None,
+            adjust_type=None,
+            comment=None,
+        )
+        storage.save_entry(cleared)
+        self.entries[cleared.date] = cleared
+        self._refresh_display()
+        self.notify(f"Cut {entry.date.strftime('%b %d')}")
+
+    def action_copy_day(self) -> None:
+        """Copy the selected day to clipboard."""
+        if self.view_mode != "week":
+            return
+        selected_date = self._get_selected_date()
+        if not selected_date:
+            return
+        entry = self.entries.get(selected_date)
+        if not entry or self._entry_is_blank(entry):
+            self.notify("Nothing to copy")
+            return
+
+        self._day_clipboard = entry
+        self.notify(f"Copied {entry.date.strftime('%b %d')}")
+
+    def action_paste_day(self) -> None:
+        """Paste clipboard contents to the selected day."""
+        if self.view_mode != "week":
+            return
+        if not self._day_clipboard:
+            self.notify("Clipboard is empty")
+            return
+        selected_date = self._get_selected_date()
+        if not selected_date:
+            return
+
+        # Get or create entry for target date
+        target = self._get_or_create_entry(selected_date)
+
+        def do_paste(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            # Create new entry with clipboard data but target date
+            pasted = TimeEntry(
+                date=target.date,
+                day_of_week=target.day_of_week,
+                clock_in=self._day_clipboard.clock_in if self._day_clipboard else None,
+                lunch_duration=self._day_clipboard.lunch_duration if self._day_clipboard else None,
+                clock_out=self._day_clipboard.clock_out if self._day_clipboard else None,
+                adjustment=self._day_clipboard.adjustment if self._day_clipboard else None,
+                adjust_type=self._day_clipboard.adjust_type if self._day_clipboard else None,
+                comment=self._day_clipboard.comment if self._day_clipboard else None,
+            )
+            storage.save_entry(pasted)
+            self.entries[pasted.date] = pasted
+            self._refresh_display()
+            self.notify(f"Pasted to {target.date.strftime('%b %d')}")
+
+        if self._entry_is_blank(target):
+            do_paste(True)
+        else:
+            self.push_screen(
+                ConfirmScreen(f"Overwrite existing entry for {target.date.strftime('%b %d')}?"),
+                do_paste
+            )
+
 
 def main():
     import sys
