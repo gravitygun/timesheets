@@ -601,6 +601,14 @@ class TimesheetApp(App):
         text.append(f"                                             Worked  {float(month_worked):>6g}h      ({round(worked_days, 2):>5g}d)\n")
         text.append(f"                                    of max possible  {float(month_max):>6g}h      ({round(max_days, 2):>5g}d)\n")
 
+        # Show "of max possible to date" only for current month
+        today = date.today()
+        if self.current_year == today.year and self.current_month == today.month:
+            month_start = date(self.current_year, self.current_month, 1)
+            max_to_date = self._get_max_hours_to_date(month_start, today)
+            max_to_date_days = float(max_to_date) / std_day if max_to_date else 0
+            text.append(f"                            of max possible to date  {float(max_to_date):>6g}h      ({round(max_to_date_days, 2):>5g}d)\n")
+
         leave_line = f"                                              Leave  {float(month_leave):>6g}h      ({round(leave_days, 2):>5g}d)\n"
         text.append(leave_line, style="dim" if month_leave == 0 else "")
 
@@ -680,6 +688,30 @@ class TimesheetApp(App):
             "public_holiday": public_holiday,
             "total": total,
         }
+
+    def _get_max_hours_to_date(self, start_date: date, end_date: date) -> Decimal:
+        """Calculate max workable hours from start_date to end_date (inclusive).
+
+        Counts weekdays and subtracts public holiday hours from entries.
+        """
+        config = storage.get_config()
+
+        # Count weekdays in range
+        weekdays = 0
+        current = start_date
+        while current <= end_date:
+            if current.weekday() < 5:  # Mon-Fri
+                weekdays += 1
+            current += timedelta(days=1)
+
+        # Get public holiday hours from entries in this range
+        public_holiday_hours = Decimal("0")
+        for entry_date, entry in self.entries.items():
+            if start_date <= entry_date <= end_date:
+                if entry.adjust_type == "P" and entry.adjusted_hours:
+                    public_holiday_hours += entry.adjusted_hours
+
+        return (Decimal(weekdays) * config.standard_day_hours) - public_holiday_hours
 
     def _refresh_year_display(self):
         config = storage.get_config()
@@ -784,6 +816,18 @@ class TimesheetApp(App):
 
         text.append(f"                                             Worked  {worked_days:>6g}d\n")
         text.append(f"                                    of max possible  {max_days:>6g}d\n")
+
+        # Show "of max possible to date" only for current company year
+        today = date.today()
+        if today.month >= 9:
+            current_company_year = today.year
+        else:
+            current_company_year = today.year - 1
+        if self.company_year_start == current_company_year:
+            year_start = date(self.company_year_start, 9, 1)
+            max_to_date = self._get_max_hours_to_date(year_start, today)
+            max_to_date_days = round(float(max_to_date) / std_day, 2) if max_to_date else 0
+            text.append(f"                            of max possible to date  {max_to_date_days:>6g}d\n")
 
         leave_line = f"                                              Leave  {leave_days:>6g}d\n"
         text.append(leave_line, style="dim" if year_leave == 0 else "")
