@@ -7,11 +7,10 @@ from datetime import time, timedelta
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Input, Label, Select
+from textual.widgets import Button, Input, Label
 from textual.screen import ModalScreen
 
 from models import TimeEntry
-from utils import ADJUST_TYPES
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -78,37 +77,62 @@ class EditDayScreen(ModalScreen[TimeEntry | None]):
     }
 
     #edit-dialog {
-        width: 50;
+        width: 70;
         height: auto;
         padding: 1 2;
         background: $surface;
         border: thick $primary;
     }
 
-    #edit-dialog Label {
+    #edit-title {
         width: 100%;
+        text-align: center;
+        text-style: bold;
         margin-bottom: 1;
     }
 
-    #edit-dialog Input {
+    .field-group {
+        width: 1fr;
+        height: auto;
+        margin: 0 1 0 0;
+    }
+
+    .field-group:last-of-type {
+        margin-right: 0;
+    }
+
+    .field-label {
+        height: 1;
+        margin-bottom: 0;
+        color: $text-muted;
+    }
+
+    .field-row {
         width: 100%;
+        height: auto;
         margin-bottom: 1;
     }
 
-    #edit-dialog Select {
+    .field-row Input {
         width: 100%;
-        margin-bottom: 1;
+    }
+
+    /* Make comment field wider */
+    #comment-group {
+        width: 2fr;
     }
 
     #edit-buttons {
         width: 100%;
         height: auto;
         margin-top: 1;
+        align: center middle;
     }
 
     #edit-buttons Button {
-        width: 1fr;
-        margin: 0 1;
+        width: auto;
+        min-width: 12;
+        margin: 0 2;
     }
     """
 
@@ -116,62 +140,100 @@ class EditDayScreen(ModalScreen[TimeEntry | None]):
         Binding("escape", "cancel", "Cancel"),
     ]
 
+    # Field order for Enter key navigation
+    FIELD_ORDER = ["clock-in", "lunch", "clock-out", "adjustment", "adjust-type", "comment"]
+
     def __init__(self, entry: TimeEntry):
         super().__init__()
         self.entry = entry
 
     def compose(self) -> ComposeResult:
         with Vertical(id="edit-dialog"):
-            yield Label(f"Edit {self.entry.day_of_week} {self.entry.date.strftime('%b %d, %Y')}")
-
-            yield Label("Clock In (HH:MM):")
-            yield Input(
-                value=self.entry.clock_in.strftime("%H:%M") if self.entry.clock_in else "",
-                placeholder="09:00",
-                id="clock-in"
+            yield Label(
+                f"Edit {self.entry.day_of_week} {self.entry.date.strftime('%b %d, %Y')}",
+                id="edit-title"
             )
 
-            yield Label("Lunch (minutes):")
-            yield Input(
-                value=str(int(self.entry.lunch_duration.total_seconds() // 60)) if self.entry.lunch_duration else "",
-                placeholder="30",
-                id="lunch"
-            )
+            # Row 1: Clock In, Lunch, Clock Out
+            with Horizontal(classes="field-row"):
+                with Vertical(classes="field-group"):
+                    yield Label("In (HH:MM)", classes="field-label")
+                    yield Input(
+                        value=self.entry.clock_in.strftime("%H:%M") if self.entry.clock_in else "",
+                        placeholder="09:00",
+                        id="clock-in"
+                    )
+                with Vertical(classes="field-group"):
+                    yield Label("Lunch (m)", classes="field-label")
+                    yield Input(
+                        value=str(int(self.entry.lunch_duration.total_seconds() // 60)) if self.entry.lunch_duration else "",
+                        placeholder="30",
+                        id="lunch"
+                    )
+                with Vertical(classes="field-group"):
+                    yield Label("Out (HH:MM)", classes="field-label")
+                    yield Input(
+                        value=self.entry.clock_out.strftime("%H:%M") if self.entry.clock_out else "",
+                        placeholder="17:30",
+                        id="clock-out"
+                    )
 
-            yield Label("Clock Out (HH:MM):")
-            yield Input(
-                value=self.entry.clock_out.strftime("%H:%M") if self.entry.clock_out else "",
-                placeholder="17:30",
-                id="clock-out"
-            )
+            # Row 2: Adjustment, Type, Comment
+            with Horizontal(classes="field-row"):
+                with Vertical(classes="field-group"):
+                    yield Label("Adjust (h)", classes="field-label")
+                    yield Input(
+                        value=str(self.entry.adjusted_hours) if self.entry.adjustment else "",
+                        placeholder="0",
+                        id="adjustment"
+                    )
+                with Vertical(classes="field-group"):
+                    yield Label("Type (L/S/T/P)", classes="field-label")
+                    yield Input(
+                        value=self.entry.adjust_type or "",
+                        placeholder="L/S/T/P",
+                        id="adjust-type",
+                        max_length=1,
+                    )
+                with Vertical(classes="field-group", id="comment-group"):
+                    yield Label("Comment", classes="field-label")
+                    yield Input(
+                        value=self.entry.comment or "",
+                        placeholder="",
+                        id="comment"
+                    )
 
-            yield Label("Adjustment (hours):")
-            yield Input(
-                value=str(self.entry.adjusted_hours) if self.entry.adjustment else "",
-                placeholder="0",
-                id="adjustment"
-            )
-
-            yield Label("Adjust Type:")
-            # Only use adjust_type if it's a valid option, otherwise default to ""
-            valid_types = [t[0] for t in ADJUST_TYPES]
-            current_type = self.entry.adjust_type if self.entry.adjust_type in valid_types else ""
-            yield Select(
-                options=[(label, value) for value, label in ADJUST_TYPES],
-                value=current_type,
-                id="adjust-type"
-            )
-
-            yield Label("Comment:")
-            yield Input(
-                value=self.entry.comment or "",
-                placeholder="",
-                id="comment"
-            )
-
+            # Buttons
             with Horizontal(id="edit-buttons"):
                 yield Button("Save", variant="primary", id="save")
                 yield Button("Cancel", variant="default", id="cancel")
+
+    def on_mount(self) -> None:
+        """Focus the first field on mount."""
+        self.query_one("#clock-in", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Move to next field on Enter, or save if on last field."""
+        current_id = event.input.id
+        if current_id in self.FIELD_ORDER:
+            current_idx = self.FIELD_ORDER.index(current_id)
+            if current_idx < len(self.FIELD_ORDER) - 1:
+                # Move to next field
+                next_id = self.FIELD_ORDER[current_idx + 1]
+                self.query_one(f"#{next_id}", Input).focus()
+            else:
+                # Last field - save
+                self._save_entry()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Auto-uppercase the adjust type field and auto-advance."""
+        if event.input.id == "adjust-type":
+            val = event.value.upper()
+            if val != event.value:
+                event.input.value = val
+            # Auto-advance to comment if valid type entered
+            if val in ("L", "S", "T", "P"):
+                self.query_one("#comment", Input).focus()
 
     def _parse_time(self, val: str) -> time | None:
         """Parse HH:MM to time object."""
@@ -203,8 +265,13 @@ class EditDayScreen(ModalScreen[TimeEntry | None]):
         adj_val = self.query_one("#adjustment", Input).value.strip()
         adjustment = timedelta(hours=float(adj_val)) if adj_val else None
 
-        adjust_type_val = self.query_one("#adjust-type", Select).value
-        adjust_type = str(adjust_type_val) if isinstance(adjust_type_val, str) and adjust_type_val else None
+        adjust_type_val = self.query_one("#adjust-type", Input).value.strip().upper()
+        adjust_type = adjust_type_val if adjust_type_val in ("L", "S", "T", "P") else None
+
+        # Validate: if something was entered but it's not valid, show error
+        if self.query_one("#adjust-type", Input).value.strip() and not adjust_type:
+            self.app.notify("Invalid adjust type. Use L, S, T, or P", severity="error")
+            return
         comment = self.query_one("#comment", Input).value.strip() or None
 
         # Validate: adjustment requires a type
