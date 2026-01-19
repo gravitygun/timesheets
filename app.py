@@ -953,6 +953,9 @@ class TimesheetApp(App):
                 self.current_month -= 1
             self.weeks = get_weeks_in_month(self.current_year, self.current_month)
             self._load_month_data()
+            header = self.query_one("#combined-header", CombinedHeader)
+            header.year = self.current_year
+            header.month = self.current_month
             self._refresh_display()
             return
 
@@ -998,6 +1001,9 @@ class TimesheetApp(App):
                 self.current_month += 1
             self.weeks = get_weeks_in_month(self.current_year, self.current_month)
             self._load_month_data()
+            header = self.query_one("#combined-header", CombinedHeader)
+            header.year = self.current_year
+            header.month = self.current_month
             self._refresh_display()
             return
 
