@@ -70,9 +70,10 @@ Run these checks before committing:
 ```bash
 ruff check *.py          # Linting
 pyright *.py             # Type checking
+pytest tests/            # Unit tests
 ```
 
-Both must pass with zero errors.
+All checks must pass with zero errors.
 
 ### Markdown
 
