@@ -170,6 +170,7 @@ The app supports syncing via cloud storage (iCloud, Dropbox, etc.) using the
    ```bash
    ruff check *.py          # Linting
    pyright *.py             # Type checking
+   pytest tests/            # Unit tests
    markdownlint *.md        # Markdown linting
    ```
 
