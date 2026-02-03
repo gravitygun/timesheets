@@ -73,13 +73,17 @@ python app.py --db-info
 
 ### Views
 
-The app has three views, accessible via keyboard shortcuts:
+The app has five views, accessible via keyboard shortcuts:
 
-| Key | View  | Description                        |
-| --- | ----- | ---------------------------------- |
-| `w` | Week  | Daily time entries for one week    |
-| `m` | Month | Weekly summaries for one month     |
-| `y` | Year  | Monthly summaries for fiscal year  |
+| Key | View        | Description                           |
+| --- | ----------- | ------------------------------------- |
+| `w` | Week        | Daily time entries for one week       |
+| `m` | Month       | Weekly summaries for one month        |
+| `y` | Year        | Monthly summaries for fiscal year     |
+| `M` | Allocations | Ticket allocations matrix for a month |
+
+Pressing `Enter` on a day in week view opens **Day view**, showing ticket
+allocations for that day.
 
 ### Navigation
 
@@ -88,7 +92,8 @@ The app has three views, accessible via keyboard shortcuts:
 | `Left`    | Previous week/month/year (depending on view)             |
 | `Right`   | Next week/month/year (depending on view)                 |
 | `Up/Down` | Navigate rows                                            |
-| `Enter`   | Drill down (year to month, month to week, week to edit)  |
+| `Enter`   | Drill down (year → month → week → day)                   |
+| `Esc`     | Return to week view (from day view)                      |
 | `t`       | Jump to today                                            |
 
 ### Editing
@@ -103,6 +108,34 @@ The app has three views, accessible via keyboard shortcuts:
 
 Quick adjust shortcuts (`L`/`S`/`T`) prompt for confirmation if the day
 already has data.
+
+### Ticket Tracking
+
+Worked hours can be allocated to tickets (e.g., JIRA IDs) for billing reports.
+
+| Key | Action (context)                          |
+| --- | ----------------------------------------- |
+| `K` | Open ticket management screen             |
+| `M` | Open allocations report (tickets × days)  |
+| `a` | Add allocation (day view)                 |
+| `d` | Delete allocation (day view)              |
+
+**Week view indicators** (Alloc column):
+
+| Symbol | Meaning                 | Style  |
+| ------ | ----------------------- | ------ |
+| `-`    | No worked hours         | dim    |
+| `?`    | Worked but no alloc     | dim    |
+| `↓`    | Under-allocated         | yellow |
+| `↑`    | Over-allocated          | red    |
+| `✓`    | Fully allocated         | green  |
+
+**Ticket management** (`K`):
+
+- Create tickets with ID (max 8 chars) and description
+- Archive/unarchive tickets
+- Delete tickets (only if no allocations exist)
+- Search/filter tickets
 
 ### Other
 

@@ -65,7 +65,7 @@ Only `P` type adjustments reduce max hours.
 
 ### Checks
 
-Run these checks before committing:
+**Always run commands inside the venv.** Either activate it first or prefix commands:
 
 ```bash
 ruff check *.py          # Linting
