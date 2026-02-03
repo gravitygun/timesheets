@@ -6,7 +6,7 @@ from datetime import date, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from models import TimeEntry, Config
+from models import Config, Ticket, TicketAllocation, TimeEntry
 
 
 def _get_db_path() -> Path:
@@ -46,8 +46,35 @@ def init_db():
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS tickets (
+            id TEXT PRIMARY KEY,
+            description TEXT NOT NULL,
+            archived INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ticket_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            hours TEXT NOT NULL,
+            entered_on_client INTEGER DEFAULT 0,
+            FOREIGN KEY (ticket_id) REFERENCES tickets(id),
+            UNIQUE(ticket_id, date)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_entries_date ON time_entries(date);
+        CREATE INDEX IF NOT EXISTS idx_allocations_date ON ticket_allocations(date);
+        CREATE INDEX IF NOT EXISTS idx_allocations_ticket ON ticket_allocations(ticket_id);
     """)
+
+    # Migration: Add entered_on_client column if it doesn't exist
+    cursor = conn.execute("PRAGMA table_info(ticket_allocations)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "entered_on_client" not in columns:
+        conn.execute(
+            "ALTER TABLE ticket_allocations ADD COLUMN entered_on_client INTEGER DEFAULT 0"
+        )
     conn.commit()
     conn.close()
 
@@ -232,3 +259,203 @@ def populate_holidays(year: int, month: int, standard_hours: Decimal) -> int:
             count += 1
 
     return count
+
+
+# --- Ticket Functions ---
+
+
+def _row_to_ticket(row: sqlite3.Row) -> Ticket:
+    """Convert a database row to a Ticket object."""
+    return Ticket(
+        id=row["id"],
+        description=row["description"],
+        archived=bool(row["archived"]),
+        created_at=date.fromisoformat(row["created_at"]) if row["created_at"] else None,
+    )
+
+
+def save_ticket(ticket: Ticket) -> None:
+    """Insert or update a ticket."""
+    conn = get_connection()
+    created_at = ticket.created_at or date.today()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO tickets (id, description, archived, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (ticket.id, ticket.description, int(ticket.archived), created_at.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_ticket(ticket_id: str) -> Ticket | None:
+    """Get a single ticket by ID."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM tickets WHERE id = ?", (ticket_id,)
+    ).fetchone()
+    conn.close()
+    return _row_to_ticket(row) if row else None
+
+
+def get_all_tickets(include_archived: bool = False) -> list[Ticket]:
+    """Get all tickets, optionally including archived ones."""
+    conn = get_connection()
+    if include_archived:
+        rows = conn.execute(
+            "SELECT * FROM tickets ORDER BY id"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM tickets WHERE archived = 0 ORDER BY id"
+        ).fetchall()
+    conn.close()
+    return [_row_to_ticket(row) for row in rows]
+
+
+def search_tickets(query: str, include_archived: bool = False) -> list[Ticket]:
+    """Search tickets by ID or description."""
+    conn = get_connection()
+    pattern = f"%{query}%"
+    if include_archived:
+        rows = conn.execute(
+            """
+            SELECT * FROM tickets
+            WHERE id LIKE ? OR description LIKE ?
+            ORDER BY id
+            """,
+            (pattern, pattern),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT * FROM tickets
+            WHERE (id LIKE ? OR description LIKE ?) AND archived = 0
+            ORDER BY id
+            """,
+            (pattern, pattern),
+        ).fetchall()
+    conn.close()
+    return [_row_to_ticket(row) for row in rows]
+
+
+def delete_ticket(ticket_id: str) -> bool:
+    """Delete a ticket. Returns False if ticket has allocations."""
+    if not can_delete_ticket(ticket_id):
+        return False
+    conn = get_connection()
+    conn.execute("DELETE FROM tickets WHERE id = ?", (ticket_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def can_delete_ticket(ticket_id: str) -> bool:
+    """Check if a ticket can be deleted (has no allocations)."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT COUNT(*) as count FROM ticket_allocations WHERE ticket_id = ?",
+        (ticket_id,),
+    ).fetchone()
+    conn.close()
+    return row["count"] == 0
+
+
+def archive_ticket(ticket_id: str) -> None:
+    """Archive a ticket."""
+    conn = get_connection()
+    conn.execute("UPDATE tickets SET archived = 1 WHERE id = ?", (ticket_id,))
+    conn.commit()
+    conn.close()
+
+
+def unarchive_ticket(ticket_id: str) -> None:
+    """Unarchive a ticket."""
+    conn = get_connection()
+    conn.execute("UPDATE tickets SET archived = 0 WHERE id = ?", (ticket_id,))
+    conn.commit()
+    conn.close()
+
+
+# --- Ticket Allocation Functions ---
+
+
+def _row_to_allocation(row: sqlite3.Row) -> TicketAllocation:
+    """Convert a database row to a TicketAllocation object."""
+    return TicketAllocation(
+        ticket_id=row["ticket_id"],
+        date=date.fromisoformat(row["date"]),
+        hours=Decimal(row["hours"]),
+        entered_on_client=bool(row["entered_on_client"]) if row["entered_on_client"] else False,
+    )
+
+
+def save_allocation(allocation: TicketAllocation) -> None:
+    """Insert or update a ticket allocation."""
+    conn = get_connection()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO ticket_allocations (ticket_id, date, hours, entered_on_client)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            allocation.ticket_id,
+            allocation.date.isoformat(),
+            str(allocation.hours),
+            int(allocation.entered_on_client),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_allocations_for_date(d: date) -> list[TicketAllocation]:
+    """Get all allocations for a specific date."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM ticket_allocations WHERE date = ? ORDER BY ticket_id",
+        (d.isoformat(),),
+    ).fetchall()
+    conn.close()
+    return [_row_to_allocation(row) for row in rows]
+
+
+def get_allocations_for_month(year: int, month: int) -> list[TicketAllocation]:
+    """Get all allocations for a calendar month."""
+    from calendar import monthrange
+    start = date(year, month, 1)
+    end = date(year, month, monthrange(year, month)[1])
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT * FROM ticket_allocations
+        WHERE date >= ? AND date <= ?
+        ORDER BY date, ticket_id
+        """,
+        (start.isoformat(), end.isoformat()),
+    ).fetchall()
+    conn.close()
+    return [_row_to_allocation(row) for row in rows]
+
+
+def delete_allocation(ticket_id: str, d: date) -> None:
+    """Delete a specific allocation."""
+    conn = get_connection()
+    conn.execute(
+        "DELETE FROM ticket_allocations WHERE ticket_id = ? AND date = ?",
+        (ticket_id, d.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_total_allocated_hours(d: date) -> Decimal:
+    """Get the total hours allocated for a specific date."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(CAST(hours AS REAL)), 0) as total FROM ticket_allocations WHERE date = ?",
+        (d.isoformat(),),
+    ).fetchone()
+    conn.close()
+    return Decimal(str(row["total"])).quantize(Decimal("0.01"))
