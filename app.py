@@ -27,22 +27,22 @@ from widgets import CombinedHeader, DayHeader, DaySummary, DayTimeEntry, WeeklyS
 
 
 class TimesheetDataTable(DataTable):
-    """Custom DataTable that delegates left/right keys to the app for navigation in week view."""
+    """Custom DataTable that delegates left/right keys to the app for navigation in week/month views."""
 
     def on_key(self, event) -> None:
-        """Handle key events - intercept left/right only in week view, 'c' in allocations."""
+        """Handle key events - intercept left/right in week/month views, 'c' in allocations."""
         if not hasattr(self.app, 'view_mode'):
             return  # Let default handling occur
 
         view_mode = self.app.view_mode  # type: ignore[attr-defined]
 
-        if event.key == "left" and view_mode == "week":
+        if event.key == "left" and view_mode in ("week", "month"):
             if hasattr(self.app, 'action_prev_week'):
                 self.app.action_prev_week()  # type: ignore[attr-defined]
             self.scroll_x = 0
             event.prevent_default()
             event.stop()
-        elif event.key == "right" and view_mode == "week":
+        elif event.key == "right" and view_mode in ("week", "month"):
             if hasattr(self.app, 'action_next_week'):
                 self.app.action_next_week()  # type: ignore[attr-defined]
             self.scroll_x = 0
@@ -2041,6 +2041,22 @@ class TimesheetApp(App):
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle Enter/double-click on table row."""
+        # Get the table ID to ensure we're handling the correct table
+        table_id = event.control.id
+
+        # Map view modes to their expected table IDs
+        expected_table_ids = {
+            "year": "year-table",
+            "month": "month-table",
+            "week": "week-table",
+            "day": "day-table",
+            "allocations": "allocations-table",
+        }
+
+        # Only process if the event is from the expected table for this view mode
+        if table_id != expected_table_ids.get(self.view_mode):
+            return
+
         if self.view_mode == "year":
             # In year view, selecting a month navigates to that month's month view
             if event.row_key:
