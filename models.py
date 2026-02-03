@@ -48,3 +48,23 @@ class Config:
     currency: str = "GBP"
     standard_day_hours: Decimal = Decimal("7.5")
     vat_rate: Decimal = Decimal("0.20")
+
+
+@dataclass
+class Ticket:
+    """A ticket/project that time can be allocated to."""
+
+    id: str  # Max 8 characters
+    description: str
+    archived: bool = False
+    created_at: date | None = None
+
+
+@dataclass
+class TicketAllocation:
+    """Hours allocated to a ticket on a specific date."""
+
+    ticket_id: str
+    date: date
+    hours: Decimal
+    entered_on_client: bool = False
