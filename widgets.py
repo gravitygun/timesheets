@@ -109,3 +109,87 @@ class WeeklySummary(Static):
         text.append(f"                                              TOTAL  {float(total):>6g}h      ({round(total_days, 2):>5g}d)")
 
         self.update(text)
+
+
+class DayHeader(Static):
+    """Header for day view showing date and worked hours."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.current_date: date | None = None
+        self.worked_hours: Decimal = Decimal("0")
+
+    def update_display(self, d: date, worked_hours: Decimal) -> None:
+        """Update the day header display."""
+        self.current_date = d
+        self.worked_hours = worked_hours
+        day_str = d.strftime("%a %b %d, %Y")
+        title = f"DAY: {day_str}"
+
+        text = Text()
+        text.append(title, style="bold")
+        self.update(text)
+
+
+class DayTimeEntry(Static):
+    """Shows time entry details for the day view."""
+
+    def update_display(
+        self,
+        clock_in: str,
+        lunch: str,
+        clock_out: str,
+        adjustment: str,
+        adjust_type: str,
+        comment: str,
+    ) -> None:
+        """Update the time entry display."""
+        text = Text()
+        text.append("  In: ", style="dim")
+        text.append(f"{clock_in:<8}", style="" if clock_in != "-" else "dim")
+        text.append("  Lunch: ", style="dim")
+        text.append(f"{lunch:<6}", style="" if lunch != "-" else "dim")
+        text.append("  Out: ", style="dim")
+        text.append(f"{clock_out:<8}", style="" if clock_out != "-" else "dim")
+        text.append("  Adj: ", style="dim")
+        text.append(f"{adjustment:<8}", style="" if adjustment != "-" else "dim")
+        text.append("  Type: ", style="dim")
+        text.append(f"{adjust_type:<4}", style="" if adjust_type else "dim")
+        if comment:
+            text.append("  Comment: ", style="dim")
+            text.append(comment[:40])
+        self.update(text)
+
+
+class DaySummary(Static):
+    """Summary for day view showing allocation status."""
+
+    def update_display(
+        self,
+        allocated: Decimal,
+        worked: Decimal,
+    ) -> None:
+        """Update the day summary display."""
+        if worked == 0:
+            pct = 0.0
+            status = "No hours"
+            status_style = "dim"
+        elif allocated == worked:
+            pct = 100.0
+            status = "✓ Exact"
+            status_style = "green"
+        elif allocated < worked:
+            pct = float(allocated / worked * 100) if worked else 0
+            status = "↓ Under"
+            status_style = "yellow"
+        else:
+            pct = float(allocated / worked * 100) if worked else 0
+            status = "↑ Over"
+            status_style = "red"
+
+        text = Text()
+        text.append(f"                                             Worked: {float(worked):.2f}h\n")
+        text.append(f"                                          Allocated: {float(allocated):.2f}h  ({pct:.1f}%)\n")
+        text.append("                                             Status: ")
+        text.append(status, style=status_style)
+        self.update(text)
