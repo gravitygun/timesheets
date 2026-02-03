@@ -14,10 +14,47 @@ from textual.coordinate import Coordinate
 from rich.text import Text
 
 import storage
-from models import TimeEntry
+from models import Ticket, TicketAllocation, TimeEntry
 from utils import get_weeks_in_month
-from screens import ConfirmScreen, EditDayScreen
-from widgets import CombinedHeader, WeeklySummary
+from screens import (
+    ConfirmScreen,
+    EditAllocationScreen,
+    EditDayScreen,
+    TicketManagementScreen,
+    TicketSelectScreen,
+)
+from widgets import CombinedHeader, DayHeader, DaySummary, DayTimeEntry, WeeklySummary
+
+
+class TimesheetDataTable(DataTable):
+    """Custom DataTable that delegates left/right keys to the app for navigation in week view."""
+
+    def on_key(self, event) -> None:
+        """Handle key events - intercept left/right only in week view, 'c' in allocations."""
+        if not hasattr(self.app, 'view_mode'):
+            return  # Let default handling occur
+
+        view_mode = self.app.view_mode  # type: ignore[attr-defined]
+
+        if event.key == "left" and view_mode == "week":
+            if hasattr(self.app, 'action_prev_week'):
+                self.app.action_prev_week()  # type: ignore[attr-defined]
+            self.scroll_x = 0
+            event.prevent_default()
+            event.stop()
+        elif event.key == "right" and view_mode == "week":
+            if hasattr(self.app, 'action_next_week'):
+                self.app.action_next_week()  # type: ignore[attr-defined]
+            self.scroll_x = 0
+            event.prevent_default()
+            event.stop()
+        elif event.key == "c" and view_mode == "allocations":
+            # Toggle entered state with 'c' key
+            if hasattr(self.app, '_toggle_allocation_entered_state'):
+                self.app._toggle_allocation_entered_state()  # type: ignore[attr-defined]
+            event.prevent_default()
+            event.stop()
+        # For other keys/views, don't intercept - let DataTable handle normally
 
 
 class TimesheetApp(App):
@@ -96,20 +133,38 @@ class TimesheetApp(App):
         display: none;
     }
 
+    #day-header {
+        height: auto;
+        background: $primary;
+        color: $text;
+        padding: 0 1;
+        text-style: bold;
+    }
+
+    #day-time-entry {
+        height: auto;
+        padding: 0 2;
+        color: $text;
+    }
+
+    #day-summary {
+        height: auto;
+        padding: 1 2;
+        color: $text;
+    }
+
     DataTable {
         height: 100%;
     }
 
     DataTable > .datatable--cursor {
         background: $secondary;
-        color: $text;
     }
     """
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("left", "prev_week", "◄"),
-        Binding("right", "next_week", "►"),
+        # left/right handled in on_key to allow Input cursor movement in modals
         Binding("up", "cursor_up", "▲", show=False),
         Binding("down", "cursor_down", "▼", show=False),
         Binding("w", "week_view", "Week"),
@@ -126,13 +181,21 @@ class TimesheetApp(App):
         Binding("ctrl+c", "copy_day", "Copy", show=False),
         Binding("ctrl+v", "paste_day", "Paste", show=False),
         Binding("question_mark", "toggle_help", "?", show=False),
+        Binding("K", "manage_tickets", "Tickets"),
+        # Day view bindings (shown when in day view via check_action)
+        Binding("a", "add_allocation", "Add"),
+        Binding("d", "delete_allocation", "Delete"),
+        Binding("c", "toggle_entered", "Entered"),
+        Binding("escape", "back_to_week", "Back"),
+        # Allocations report
+        Binding("M", "allocations_view", "Allocs"),
     ]
 
     def __init__(self):
         super().__init__()
         storage.init_db()
 
-        # View mode: "week", "month", or "year"
+        # View mode: "week", "month", "year", or "day"
         self.view_mode = "week"
 
         # Start with current month and week
@@ -151,6 +214,10 @@ class TimesheetApp(App):
 
         # Track last selected date in week view for restoring selection
         self.last_selected_date: date | None = None
+
+        # Day view: currently selected date and its allocations
+        self.day_view_date: date | None = None
+        self.day_allocations: list[TicketAllocation] = []
 
         # Privacy mode: hide earnings by default
         self.show_money = False
@@ -211,25 +278,36 @@ class TimesheetApp(App):
     def compose(self) -> ComposeResult:
         # Week view widgets
         yield CombinedHeader(self.current_year, self.current_month, id="combined-header")
-        yield Container(DataTable(id="week-table"), id="week-table-container")
+        yield Container(TimesheetDataTable(id="week-table"), id="week-table-container")
         yield Static(id="week-earnings", classes="hidden")
         yield WeeklySummary(id="weekly-summary")
         # Month view widgets (hidden by default)
         yield Static(id="month-header", classes="hidden")
-        yield Container(DataTable(id="month-table"), id="month-table-container", classes="hidden")
+        yield Container(TimesheetDataTable(id="month-table"), id="month-table-container", classes="hidden")
         yield Static(id="month-earnings", classes="hidden")
         yield Static(id="month-summary", classes="hidden")
         # Year view widgets (hidden by default)
         yield Static(id="year-header", classes="hidden")
-        yield Container(DataTable(id="year-table"), id="year-table-container", classes="hidden")
+        yield Container(TimesheetDataTable(id="year-table"), id="year-table-container", classes="hidden")
         yield Static(id="year-earnings", classes="hidden")
         yield Static(id="year-summary", classes="hidden")
+        # Day view widgets (hidden by default)
+        yield DayHeader(id="day-header", classes="hidden")
+        yield DayTimeEntry(id="day-time-entry", classes="hidden")
+        yield Container(TimesheetDataTable(id="day-table"), id="day-table-container", classes="hidden")
+        yield DaySummary(id="day-summary", classes="hidden")
+        # Allocations report widgets (hidden by default)
+        yield Static(id="allocations-header", classes="hidden")
+        yield Container(TimesheetDataTable(id="allocations-table"), id="allocations-table-container", classes="hidden")
+        yield Static(id="allocations-summary", classes="hidden")
         yield Footer()
 
     def on_mount(self):
         self._setup_week_table()
         self._setup_month_table()
         self._setup_year_table()
+        self._setup_day_table()
+        self._setup_allocations_table()
         self._load_month_data()
         # Ensure header matches initial state
         header = self.query_one("#combined-header", CombinedHeader)
@@ -251,9 +329,10 @@ class TimesheetApp(App):
         table.add_column("Lunch", width=7)
         table.add_column("Out", width=7)
         table.add_column("Worked", width=8)
+        table.add_column("Alloc", width=5)
         table.add_column("Adj", width=7)
         table.add_column("Type", width=5)
-        table.add_column("Comment", width=50)  # Much wider for comments
+        table.add_column("Comment", width=48)  # Slightly smaller to fit Alloc
 
     def _setup_month_table(self):
         table = self.query_one("#month-table", DataTable)
@@ -281,6 +360,21 @@ class TimesheetApp(App):
         if self.show_money:
             table.add_column("Bill", width=10)
             table.add_column("+VAT", width=10)
+
+    def _setup_day_table(self):
+        """Set up the day allocations table."""
+        table = self.query_one("#day-table", DataTable)
+        table.cursor_type = "row"
+        table.add_column("Ticket", width=10)
+        table.add_column("Description", width=40)
+        table.add_column("Hours", width=8)
+        table.add_column("Entered", width=7)
+
+    def _setup_allocations_table(self):
+        """Set up the allocations report table (columns added dynamically)."""
+        table = self.query_one("#allocations-table", DataTable)
+        table.cursor_type = "cell"  # Cell mode for clicking individual allocations
+        # Columns are added dynamically in _refresh_allocations_display
 
     def _rebuild_tables(self):
         """Rebuild table columns when show_money changes."""
@@ -351,8 +445,12 @@ class TimesheetApp(App):
             self._refresh_week_display()
         elif self.view_mode == "month":
             self._refresh_month_display()
-        else:
+        elif self.view_mode == "year":
             self._refresh_year_display()
+        elif self.view_mode == "day":
+            self._refresh_day_display()
+        elif self.view_mode == "allocations":
+            self._refresh_allocations_display()
 
     def _refresh_week_display(self):
         # Update combined header
@@ -443,7 +541,10 @@ class TimesheetApp(App):
             worked_str = f"{float(entry.worked_hours):g}h" if entry.worked_hours else "-"
             adj_str = f"{float(entry.adjusted_hours):g}h" if entry.adjusted_hours else "-"
             type_str = entry.adjust_type or ""
-            comment_str = (entry.comment[:47] + "...") if entry.comment and len(entry.comment) > 47 else (entry.comment or "")
+            comment_str = (entry.comment[:45] + "...") if entry.comment and len(entry.comment) > 45 else (entry.comment or "")
+
+            # Calculate allocation status
+            alloc_status = self._get_allocation_status(d, entry.worked_hours)
 
             # Highlight if this day is in the current billing month
             date_str = d.strftime("%b %d")
@@ -461,6 +562,7 @@ class TimesheetApp(App):
                 Text(lunch_str, style=style),
                 Text(out_str, style=style),
                 Text(worked_str, style=style),
+                alloc_status,
                 Text(adj_str, style=style),
                 Text(type_str, style=style),
                 Text(comment_str, style=style),
@@ -873,6 +975,317 @@ class TimesheetApp(App):
         else:
             year_earnings.add_class("hidden")
 
+    def _refresh_day_display(self):
+        """Refresh the day view (ticket allocations for a single day)."""
+        if not self.day_view_date:
+            return
+
+        # Get the time entry for this day (fetch from storage directly
+        # in case it's a boundary day from an adjacent month)
+        entry = storage.get_entry(self.day_view_date)
+        worked_hours = entry.worked_hours if entry else Decimal("0")
+
+        # Update day header
+        day_header = self.query_one("#day-header", DayHeader)
+        day_header.update_display(self.day_view_date, worked_hours)
+
+        # Update time entry details
+        day_time_entry = self.query_one("#day-time-entry", DayTimeEntry)
+        if entry:
+            in_str = entry.clock_in.strftime("%H:%M") if entry.clock_in else "-"
+            lunch_str = f"{int(entry.lunch_duration.total_seconds() // 60)}m" if entry.lunch_duration else "-"
+            out_str = entry.clock_out.strftime("%H:%M") if entry.clock_out else "-"
+            adj_str = f"{float(entry.adjusted_hours):g}h" if entry.adjusted_hours else "-"
+            type_str = entry.adjust_type or ""
+            comment_str = entry.comment or ""
+        else:
+            in_str = "-"
+            lunch_str = "-"
+            out_str = "-"
+            adj_str = "-"
+            type_str = ""
+            comment_str = ""
+        day_time_entry.update_display(in_str, lunch_str, out_str, adj_str, type_str, comment_str)
+
+        # Load allocations for this day
+        self.day_allocations = storage.get_allocations_for_date(self.day_view_date)
+
+        # Build table data
+        table = self.query_one("#day-table", DataTable)
+        table.clear()
+
+        for alloc in self.day_allocations:
+            ticket = storage.get_ticket(alloc.ticket_id)
+            desc = ticket.description[:40] if ticket else "(unknown)"
+            entered = Text("✓", style="green") if alloc.entered_on_client else Text("-", style="dim")
+            table.add_row(
+                alloc.ticket_id,
+                desc,
+                f"{float(alloc.hours):.2f}h",
+                entered,
+                key=alloc.ticket_id,
+            )
+
+        # Calculate total allocated
+        total_allocated = sum((a.hours for a in self.day_allocations), Decimal("0"))
+
+        # Update day summary
+        day_summary = self.query_one("#day-summary", DaySummary)
+        day_summary.update_display(total_allocated, worked_hours)
+
+    def _get_allocation_status(self, d: date, worked_hours: Decimal) -> Text:
+        """Get the allocation status indicator for a day.
+
+        Returns a styled Text object:
+        - `?` (dim) = no allocations
+        - `↓` (yellow) = under-allocated
+        - `↑` (red) = over-allocated
+        - `✓` (green) = exactly allocated
+        """
+        if worked_hours == 0:
+            return Text("-", style="dim")
+
+        total_allocated = storage.get_total_allocated_hours(d)
+
+        if total_allocated == 0:
+            return Text("?", style="dim")
+        elif total_allocated < worked_hours:
+            return Text("↓", style="yellow")
+        elif total_allocated > worked_hours:
+            return Text("↑", style="red")
+        else:
+            return Text("✓", style="green")
+
+    def _get_allocation_status_with_sep(self, d: date, worked_hours: Decimal, is_friday: bool) -> Text:
+        """Get allocation status indicator, with separator for Friday columns."""
+        if worked_hours == 0:
+            symbol, style = "-", "dim"
+        else:
+            total_allocated = storage.get_total_allocated_hours(d)
+            if total_allocated == 0:
+                symbol, style = "?", "dim"
+            elif total_allocated < worked_hours:
+                symbol, style = "↓", "yellow"
+            elif total_allocated > worked_hours:
+                symbol, style = "↑", "red"
+            else:
+                symbol, style = "✓", "green"
+
+        cell = Text()
+        # Right-justify all day columns for consistency (5 chars to match icon+hours width)
+        cell.append(f"    {symbol}", style=style)
+        if is_friday:
+            cell.append("│", style="dim")
+        return cell
+
+    def _refresh_allocations_display(self):
+        """Refresh the allocations report (tickets × days matrix)."""
+        from calendar import monthrange
+
+        # Update header
+        alloc_header = self.query_one("#allocations-header", Static)
+        month_name = date(self.current_year, self.current_month, 1).strftime("%B %Y")
+        alloc_header.update(Text(f"ALLOCATIONS: {month_name}", style="bold"))
+
+        # Get days in month
+        num_days = monthrange(self.current_year, self.current_month)[1]
+
+        # Get all allocations for the month
+        allocations = storage.get_allocations_for_month(self.current_year, self.current_month)
+
+        # Get all entries for the month (for worked hours and adjust types)
+        entries = storage.get_month_entries(self.current_year, self.current_month)
+        entries_dict = {e.date: e for e in entries}
+
+        # Build dicts: ticket_id -> {date -> hours} and (ticket_id, date) -> allocation
+        ticket_hours: dict[str, dict[date, Decimal]] = {}
+        alloc_lookup: dict[tuple[str, date], TicketAllocation] = {}
+        for alloc in allocations:
+            if alloc.ticket_id not in ticket_hours:
+                ticket_hours[alloc.ticket_id] = {}
+            ticket_hours[alloc.ticket_id][alloc.date] = alloc.hours
+            alloc_lookup[(alloc.ticket_id, alloc.date)] = alloc
+
+        # Get all tickets that have allocations this month
+        ticket_ids = sorted(ticket_hours.keys())
+
+        # Calculate optimal ticket column width (min 6, max 10)
+        max_ticket_len = max((len(tid) for tid in ticket_ids), default=6)
+        ticket_col_width = min(max(max_ticket_len, 6), 10)
+
+        # Determine which days to show (exclude weekends unless they have worked hours)
+        days_to_show: list[int] = []
+        for day in range(1, num_days + 1):
+            d = date(self.current_year, self.current_month, day)
+            is_weekend = d.weekday() >= 5
+            if not is_weekend:
+                days_to_show.append(day)
+            else:
+                # Include weekend day only if it has worked hours
+                entry = entries_dict.get(d)
+                if entry and entry.worked_hours > 0:
+                    days_to_show.append(day)
+
+        # Store for click handling
+        self._alloc_days_to_show = days_to_show
+
+        # Rebuild table with correct columns
+        table = self.query_one("#allocations-table", DataTable)
+        table.clear(columns=True)
+
+        # Add columns: Ticket, Description, then each day, then Total
+        # Track Fridays for adding vertical separators
+        friday_days = set()
+        table.add_column("Ticket", width=ticket_col_width)
+        table.add_column("Description", width=20)
+        for day in days_to_show:
+            d = date(self.current_year, self.current_month, day)
+            if d.weekday() == 4:  # Friday - week boundary
+                friday_days.add(day)
+                # Right-justify day number, add │ separator (extra width for circle icon)
+                table.add_column(f"{day:>5}│", width=6)
+            else:
+                # Right-justify all day headers for consistency (extra width for circle icon)
+                table.add_column(f"{day:>5}", width=5)
+        table.add_column("Total", width=6)
+
+        # Add rows for each ticket
+        for ticket_id in ticket_ids:
+            ticket = storage.get_ticket(ticket_id)
+            desc = ticket.description[:18] if ticket else ""
+            row_data: list[str | Text] = [ticket_id, desc]
+            row_total = Decimal("0")
+
+            for day in days_to_show:
+                d = date(self.current_year, self.current_month, day)
+                hours = ticket_hours[ticket_id].get(d, Decimal("0"))
+                row_total += hours
+
+                is_weekend = d.weekday() >= 5
+                is_friday = day in friday_days
+
+                if hours > 0:
+                    # Check entered state for icon and styling
+                    alloc = alloc_lookup.get((ticket_id, d))
+                    if alloc and alloc.entered_on_client:
+                        icon = "●"
+                        icon_style = "dim green" if is_weekend else "green"
+                    else:
+                        icon = "○"
+                        icon_style = "dim yellow" if is_weekend else "yellow"
+                    text_style = "dim" if is_weekend else ""
+                    content = f"{float(hours):g}"
+                    cell = Text()
+                    # Coloured icon + right-justified hours
+                    cell.append(icon, style=icon_style)
+                    cell.append(f"{content:>4}", style=text_style)
+                    if is_friday:
+                        cell.append("│", style="dim")
+                else:
+                    # No allocation for this ticket on this day
+                    cell = Text()
+                    cell.append("    -", style="dim")
+                    if is_friday:
+                        cell.append("│", style="dim")
+
+                row_data.append(cell)
+
+            row_data.append(Text(f"{float(row_total):g}", style="bold"))
+            table.add_row(*row_data, key=ticket_id)
+
+        # Add summary rows: Worked, Status, and Week Total
+        worked_row: list[str | Text] = ["Worked", ""]
+        status_row: list[str | Text] = ["Status", ""]
+        week_total_row: list[str | Text] = ["Wk Tot", ""]
+        week_total = Decimal("0")
+        month_total = Decimal("0")
+
+        for day in days_to_show:
+            d = date(self.current_year, self.current_month, day)
+            entry = entries_dict.get(d)
+            worked = entry.worked_hours if entry else Decimal("0")
+            is_weekend = d.weekday() >= 5
+            is_friday = day in friday_days
+
+            # Accumulate weekly and monthly totals (worked hours only, not adjustments)
+            if entry:
+                week_total += entry.worked_hours
+                month_total += entry.worked_hours
+
+            if worked > 0:
+                content = f"{float(worked):g}"
+                style = "dim" if is_weekend else ""
+                cell = Text()
+                cell.append(f"{content:>5}", style=style)
+                if is_friday:
+                    cell.append("│", style="dim")
+                worked_row.append(cell)
+            elif entry and entry.adjust_type:
+                # Show adjust type for leave/sick/PH days in Worked row
+                content = f"[{entry.adjust_type}]"
+                cell = Text()
+                cell.append(f"{content:>5}", style="dim")
+                if is_friday:
+                    cell.append("│", style="dim")
+                worked_row.append(cell)
+            else:
+                cell = Text()
+                cell.append("    -", style="dim")
+                if is_friday:
+                    cell.append("│", style="dim")
+                worked_row.append(cell)
+
+            # Status indicator
+            status_cell = self._get_allocation_status_with_sep(d, worked, is_friday)
+            status_row.append(status_cell)
+
+            # Week total - show on Friday, empty otherwise
+            if is_friday:
+                cell = Text()
+                cell.append(f"{float(week_total):>5g}", style="bold")
+                cell.append("│", style="dim")
+                week_total_row.append(cell)
+                week_total = Decimal("0")  # Reset for next week
+            else:
+                cell = Text()
+                cell.append("     ", style="dim")
+                week_total_row.append(cell)
+
+        worked_row.append(Text(""))  # No total for worked row
+        status_row.append(Text(""))  # No total for status row
+        week_total_row.append(Text(f"{float(month_total):g}", style="bold"))  # Month grand total
+
+        table.add_row(*worked_row, key="__worked__")
+        table.add_row(*status_row, key="__status__")
+        table.add_row(*week_total_row, key="__week_total__")
+
+        # Update summary
+        alloc_summary = self.query_one("#allocations-summary", Static)
+        total_allocated = sum((a.hours for a in allocations), Decimal("0"))
+        total_worked = sum((e.worked_hours for e in entries), Decimal("0"))
+        mismatch_days = sum(
+            1 for day in days_to_show
+            if self._has_allocation_mismatch(
+                date(self.current_year, self.current_month, day),
+                entries_dict
+            )
+        )
+
+        text = Text()
+        text.append(f"Total allocated: {float(total_allocated):.1f}h")
+        text.append(f"   Total worked: {float(total_worked):.1f}h")
+        if mismatch_days > 0:
+            text.append(f"   Mismatched days: {mismatch_days}", style="red")
+        alloc_summary.update(text)
+
+    def _has_allocation_mismatch(self, d: date, entries_dict: dict) -> bool:
+        """Check if a day has an allocation mismatch."""
+        entry = entries_dict.get(d)
+        if not entry or entry.worked_hours == 0:
+            return False
+        allocated = storage.get_total_allocated_hours(d)
+        return allocated != entry.worked_hours
+
     def _set_view_mode(self, mode: str):
         """Switch between view modes and toggle widget visibility."""
         self.view_mode = mode
@@ -883,6 +1296,10 @@ class TimesheetApp(App):
         month_widgets = ["#month-header", "#month-table-container", "#month-earnings", "#month-summary"]
         # Year view widgets
         year_widgets = ["#year-header", "#year-table-container", "#year-earnings", "#year-summary"]
+        # Day view widgets
+        day_widgets = ["#day-header", "#day-time-entry", "#day-table-container", "#day-summary"]
+        # Allocations report widgets
+        alloc_widgets = ["#allocations-header", "#allocations-table-container", "#allocations-summary"]
 
         for widget_id in week_widgets:
             widget = self.query_one(widget_id)
@@ -905,6 +1322,20 @@ class TimesheetApp(App):
             else:
                 widget.add_class("hidden")
 
+        for widget_id in day_widgets:
+            widget = self.query_one(widget_id)
+            if mode == "day":
+                widget.remove_class("hidden")
+            else:
+                widget.add_class("hidden")
+
+        for widget_id in alloc_widgets:
+            widget = self.query_one(widget_id)
+            if mode == "allocations":
+                widget.remove_class("hidden")
+            else:
+                widget.add_class("hidden")
+
         # Update binding visibility based on view mode
         self._update_bindings_for_mode(mode)
 
@@ -917,6 +1348,10 @@ class TimesheetApp(App):
             self.query_one("#month-table", DataTable).focus()
         elif mode == "year":
             self.query_one("#year-table", DataTable).focus()
+        elif mode == "day":
+            self.query_one("#day-table", DataTable).focus()
+        elif mode == "allocations":
+            self.query_one("#allocations-table", DataTable).focus()
 
     def _update_bindings_for_mode(self, mode: str):
         """Update footer bindings based on view mode."""
@@ -926,18 +1361,39 @@ class TimesheetApp(App):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Check if an action is available based on current view mode."""
         if action == "week_view":
+            # Show in day view (goes back to week) but not in week view itself
             return self.view_mode != "week"
         elif action == "month_view":
-            return self.view_mode != "month"
+            return self.view_mode not in ("month", "day")
         elif action == "year_view":
-            return self.view_mode != "year"
+            return self.view_mode not in ("year", "day")
         elif action == "populate_holidays":
             return self.view_mode == "year"
         elif action == "edit_day":
-            return self.view_mode == "week"
+            # Show Edit in week view and day view
+            return True if self.view_mode in ("week", "day") else None
+        elif action == "add_allocation":
+            # Only show Add in day view
+            return True if self.view_mode == "day" else None
+        elif action == "delete_allocation":
+            # Only show Delete in day view
+            return True if self.view_mode == "day" else None
+        elif action == "back_to_week":
+            # Only show Back in day view
+            return True if self.view_mode == "day" else None
+        elif action == "toggle_entered":
+            # Only show Entered toggle in day view
+            return True if self.view_mode == "day" else None
+        elif action == "allocations_view":
+            return self.view_mode != "allocations"
         return True
 
     def action_prev_week(self):
+        if self.view_mode == "day":
+            # Navigate to previous day with worked hours
+            self._navigate_to_prev_worked_day()
+            return
+
         if self.view_mode == "year":
             # Navigate to previous year
             self.company_year_start -= 1
@@ -986,6 +1442,11 @@ class TimesheetApp(App):
         table.move_cursor(row=selected_row)
 
     def action_next_week(self):
+        if self.view_mode == "day":
+            # Navigate to next day with worked hours
+            self._navigate_to_next_worked_day()
+            return
+
         if self.view_mode == "year":
             # Navigate to next year
             self.company_year_start += 1
@@ -1067,6 +1528,139 @@ class TimesheetApp(App):
             self.action_show_help_panel()
         self._help_panel_visible = not self._help_panel_visible
 
+    def action_manage_tickets(self):
+        """Open ticket management screen."""
+        self.push_screen(TicketManagementScreen())
+
+    def action_add_allocation(self):
+        """Add a new allocation in day view."""
+        if self.view_mode != "day" or not self.day_view_date:
+            return
+
+        # Capture the date at the start of the flow (don't rely on day_view_date later
+        # as it could change if user navigates while modal is open)
+        self._allocation_target_date = self.day_view_date
+
+        # Open ticket selector
+        self.push_screen(TicketSelectScreen(), self._on_ticket_selected_for_allocation)
+
+    def _on_ticket_selected_for_allocation(self, ticket: Ticket | None) -> None:
+        """Handle ticket selection for new allocation."""
+        # Use the captured target date, not day_view_date (which may have changed)
+        target_date = getattr(self, '_allocation_target_date', None)
+        if not ticket or not target_date:
+            return
+
+        # Reload allocations for the target date (in case they differ from displayed)
+        target_allocations = storage.get_allocations_for_date(target_date)
+
+        # Check if already allocated
+        existing = next((a for a in target_allocations if a.ticket_id == ticket.id), None)
+        if existing:
+            self.notify(f"{ticket.id} already has an allocation. Edit it instead.", severity="warning")
+            return
+
+        # Calculate remaining hours (fetch entry from storage for boundary days)
+        entry = storage.get_entry(target_date)
+        worked = entry.worked_hours if entry else Decimal("0")
+        total_allocated = sum((a.hours for a in target_allocations), Decimal("0"))
+        remaining = worked - total_allocated
+
+        self.push_screen(
+            EditAllocationScreen(
+                ticket,
+                current_hours="",
+                remaining_hours=str(remaining),
+            ),
+            self._on_allocation_edited,
+        )
+
+    def action_delete_allocation(self):
+        """Delete the selected allocation in day view."""
+        if self.view_mode != "day" or not self.day_view_date:
+            return
+
+        table = self.query_one("#day-table", DataTable)
+        if table.row_count == 0:
+            self.notify("No allocations to delete", severity="warning")
+            return
+
+        row_key = table.coordinate_to_cell_key(Coordinate(table.cursor_row, 0)).row_key
+        if row_key:
+            ticket_id = str(row_key.value)
+            self.push_screen(
+                ConfirmScreen(f"Delete allocation for {ticket_id}?"),
+                lambda confirmed: self._on_delete_allocation_confirmed(confirmed, ticket_id),
+            )
+
+    def _on_delete_allocation_confirmed(self, confirmed: bool | None, ticket_id: str) -> None:
+        """Handle delete allocation confirmation."""
+        if confirmed and self.day_view_date:
+            storage.delete_allocation(ticket_id, self.day_view_date)
+            self.notify(f"Deleted allocation for {ticket_id}")
+            self._refresh_display()
+
+    def action_toggle_entered(self):
+        """Toggle the entered_on_client flag for the selected allocation."""
+        if self.view_mode != "day" or not self.day_view_date:
+            return
+
+        table = self.query_one("#day-table", DataTable)
+        if table.row_count == 0:
+            return
+
+        row_key = table.coordinate_to_cell_key(Coordinate(table.cursor_row, 0)).row_key
+        if not row_key:
+            return
+
+        ticket_id = str(row_key.value)
+        alloc = next((a for a in self.day_allocations if a.ticket_id == ticket_id), None)
+        if not alloc:
+            return
+
+        # Toggle the flag
+        new_value = not alloc.entered_on_client
+        updated_alloc = TicketAllocation(
+            ticket_id=alloc.ticket_id,
+            date=alloc.date,
+            hours=alloc.hours,
+            entered_on_client=new_value,
+        )
+        storage.save_allocation(updated_alloc)
+
+        status = "marked as entered" if new_value else "unmarked"
+        self.notify(f"{ticket_id} {status}")
+        self._refresh_display()
+
+    def action_back_to_week(self):
+        """Return to week view from day view."""
+        if self.view_mode != "day":
+            return
+
+        # Use the current day view date (may have changed via navigation)
+        target_date = self.day_view_date
+
+        if target_date:
+            # Switch to the correct month if needed
+            if target_date.year != self.current_year or target_date.month != self.current_month:
+                self.current_year = target_date.year
+                self.current_month = target_date.month
+                self.weeks = get_weeks_in_month(self.current_year, self.current_month)
+                self._load_month_data()
+                header = self.query_one("#combined-header", CombinedHeader)
+                header.year = self.current_year
+                header.month = self.current_month
+
+            # Find the week containing the target date
+            self.current_week_idx = self._find_week_for_date(target_date)
+            self.last_selected_date = target_date
+
+        self._set_view_mode("week")
+
+        # Select the day we were viewing
+        if target_date:
+            self._select_date(target_date)
+
     def action_goto_today(self):
         today = date.today()
         self.current_year = today.year
@@ -1128,6 +1722,12 @@ class TimesheetApp(App):
             monday = week_start + timedelta(days=2)
             self._select_date(monday)
 
+    def action_allocations_view(self):
+        """Switch to allocations report view."""
+        if self.view_mode == "week":
+            self.last_selected_date = self._get_selected_date()
+        self._set_view_mode("allocations")
+
     def action_year_view(self):
         """Switch to year view."""
         if self.view_mode != "year":
@@ -1172,7 +1772,10 @@ class TimesheetApp(App):
 
     def action_week_view(self):
         """Switch to week view."""
-        if self.view_mode == "month":
+        if self.view_mode == "day":
+            # From day view, go to the week containing the current day
+            self.action_back_to_week()
+        elif self.view_mode == "month":
             # In month view, navigate to the selected week
             table = self.query_one("#month-table", DataTable)
             row_key = table.coordinate_to_cell_key(Coordinate(table.cursor_row, 0)).row_key
@@ -1218,6 +1821,224 @@ class TimesheetApp(App):
             self._refresh_display()
         self._select_day_in_week()
 
+    def _navigate_to_day_view(self, d: date, auto_edit: bool = True) -> None:
+        """Navigate to day view for a specific date.
+
+        Args:
+            d: The date to navigate to.
+            auto_edit: If True, automatically open edit modal when day has no
+                       worked hours and no adjusted hours.
+        """
+        self.day_view_date = d
+        self.last_selected_date = d  # Remember for returning to week view
+        self._set_view_mode("day")
+
+        # Auto-open edit modal if no worked hours and no adjusted hours
+        if auto_edit:
+            entry = storage.get_entry(d)
+            if entry is None or (entry.worked_hours == 0 and entry.adjusted_hours == 0):
+                # Create entry if it doesn't exist
+                if entry is None:
+                    entry = TimeEntry(date=d, day_of_week=d.strftime("%a"))
+                self.push_screen(EditDayScreen(entry), self._on_day_edit_complete)
+
+    def _navigate_to_prev_worked_day(self) -> None:
+        """Navigate to previous day with worked hours."""
+        if not self.day_view_date:
+            return
+
+        # Search backwards from current day for a day with worked hours
+        current = self.day_view_date - timedelta(days=1)
+        # Search up to 365 days back
+        for _ in range(365):
+            entry = storage.get_entry(current)
+            if entry and entry.worked_hours > 0:
+                self._navigate_to_day_view(current, auto_edit=False)
+                return
+            current -= timedelta(days=1)
+        # No day found - stay on current day
+
+    def _navigate_to_next_worked_day(self) -> None:
+        """Navigate to next day with worked hours."""
+        if not self.day_view_date:
+            return
+
+        # Search forwards from current day for a day with worked hours
+        current = self.day_view_date + timedelta(days=1)
+        # Search up to 365 days forward
+        for _ in range(365):
+            entry = storage.get_entry(current)
+            if entry and entry.worked_hours > 0:
+                self._navigate_to_day_view(current, auto_edit=False)
+                return
+            current += timedelta(days=1)
+        # No day found - stay on current day
+
+    def _edit_allocation(self, ticket_id: str) -> None:
+        """Edit an existing allocation."""
+        if not self.day_view_date:
+            return
+
+        # Capture the date at the start of the flow (for consistency with add flow)
+        self._allocation_target_date = self.day_view_date
+
+        # Find the current allocation
+        alloc = next((a for a in self.day_allocations if a.ticket_id == ticket_id), None)
+        if not alloc:
+            return
+
+        ticket = storage.get_ticket(ticket_id)
+        if not ticket:
+            return
+
+        # Calculate remaining hours (fetch entry from storage for boundary days)
+        entry = storage.get_entry(self.day_view_date)
+        worked = entry.worked_hours if entry else Decimal("0")
+        total_allocated = sum((a.hours for a in self.day_allocations), Decimal("0"))
+        remaining = worked - total_allocated + alloc.hours  # Add back current allocation
+
+        self.push_screen(
+            EditAllocationScreen(
+                ticket,
+                current_hours=str(alloc.hours),
+                remaining_hours=str(remaining),
+            ),
+            self._on_allocation_edited,
+        )
+
+    def _on_allocation_edited(self, result: tuple[str, str] | None) -> None:
+        """Handle allocation edit result."""
+        # Use the captured target date, not day_view_date (which may have changed)
+        target_date = getattr(self, '_allocation_target_date', None)
+        if result and target_date:
+            ticket_id, hours_str = result
+            hours = Decimal(hours_str)
+            if hours > 0:
+                alloc = TicketAllocation(
+                    ticket_id=ticket_id,
+                    date=target_date,
+                    hours=hours,
+                )
+                storage.save_allocation(alloc)
+                self.notify(f"Allocated {hours}h to {ticket_id}")
+            else:
+                # Zero hours means delete the allocation
+                storage.delete_allocation(ticket_id, target_date)
+                self.notify(f"Removed allocation for {ticket_id}")
+            self._refresh_display()
+
+    def on_data_table_cell_highlighted(self, event: DataTable.CellHighlighted) -> None:
+        """Highlight the ticket ID when cursor moves to any cell in that row."""
+        if self.view_mode != "allocations":
+            return
+
+        table = self.query_one("#allocations-table", DataTable)
+        row_key = event.cell_key.row_key
+
+        # Skip if no row key or if it's a summary row
+        if not row_key or str(row_key.value).startswith("__"):
+            # Restore previous highlight if any
+            prev_row = getattr(self, '_alloc_highlighted_row', None)
+            if prev_row:
+                self._restore_ticket_cell(table, prev_row)
+                self._alloc_highlighted_row = None
+            return
+
+        ticket_id = str(row_key.value)
+        prev_row = getattr(self, '_alloc_highlighted_row', None)
+
+        # If same row, nothing to do
+        if prev_row == ticket_id:
+            return
+
+        # Restore previous row's ticket cell
+        if prev_row:
+            self._restore_ticket_cell(table, prev_row)
+
+        # Highlight current row's ticket cell
+        self._highlight_ticket_cell(table, ticket_id)
+        self._alloc_highlighted_row = ticket_id
+
+    def _highlight_ticket_cell(self, table: DataTable, ticket_id: str) -> None:
+        """Highlight the ticket ID cell with reverse video style."""
+        first_col_key = list(table.columns.keys())[0]
+        table.update_cell(ticket_id, first_col_key, Text(ticket_id, style="reverse"))
+
+    def _restore_ticket_cell(self, table: DataTable, ticket_id: str) -> None:
+        """Restore the ticket ID cell to normal style."""
+        first_col_key = list(table.columns.keys())[0]
+        try:
+            table.update_cell(ticket_id, first_col_key, ticket_id)
+        except Exception:
+            pass  # Row may no longer exist
+
+    def _toggle_allocation_entered_state(self) -> None:
+        """Toggle entered state for the currently selected allocation cell."""
+        if self.view_mode != "allocations":
+            return
+
+        table = self.query_one("#allocations-table", DataTable)
+
+        # Get current cursor position
+        cursor_row = table.cursor_row
+        cursor_col = table.cursor_column
+
+        # Get the row key from cursor position
+        if cursor_row >= len(table.rows):
+            return
+        row_key = list(table.rows.keys())[cursor_row]
+
+        # Skip summary rows
+        if str(row_key.value).startswith("__"):
+            return
+
+        ticket_id = str(row_key.value)
+
+        # Columns: 0=Ticket, 1=Description, 2..n-1=days, n=Total
+        days_to_show = getattr(self, '_alloc_days_to_show', [])
+        day_col_start = 2
+        day_col_end = day_col_start + len(days_to_show)
+
+        if cursor_col < day_col_start or cursor_col >= day_col_end:
+            return
+
+        # Get the day for this column
+        day_index = cursor_col - day_col_start
+        if day_index >= len(days_to_show):
+            return
+
+        day = days_to_show[day_index]
+        d = date(self.current_year, self.current_month, day)
+
+        # Check if there's an allocation for this ticket/date
+        alloc = next(
+            (a for a in storage.get_allocations_for_date(d) if a.ticket_id == ticket_id),
+            None
+        )
+
+        if alloc:
+            # Toggle the entered state
+            updated = TicketAllocation(
+                ticket_id=alloc.ticket_id,
+                date=alloc.date,
+                hours=alloc.hours,
+                entered_on_client=not alloc.entered_on_client,
+            )
+            storage.save_allocation(updated)
+            status = "entered" if updated.entered_on_client else "not entered"
+            self.notify(f"{ticket_id} on {d.strftime('%b %d')}: {status}")
+
+            # Refresh and restore cursor position
+            self._refresh_display()
+            table = self.query_one("#allocations-table", DataTable)
+            table.move_cursor(row=cursor_row, column=cursor_col)
+
+    def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+        """Handle Enter/click on cell in allocations view to toggle entered state."""
+        if self.view_mode != "allocations":
+            return
+        self._toggle_allocation_entered_state()
+
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle Enter/double-click on table row."""
         if self.view_mode == "year":
@@ -1238,15 +2059,16 @@ class TimesheetApp(App):
                         break
                 self._set_view_mode("week")
                 self._select_day_in_week()
-        else:
-            # In week view, selecting a day opens edit modal
+        elif self.view_mode == "week":
+            # In week view, selecting a day navigates to day view
             if event.row_key:
                 selected_date = date.fromisoformat(str(event.row_key.value))
-                entry = self._get_or_create_entry(selected_date)
-                # Store current row for advancing after edit
-                table = self.query_one("#week-table", DataTable)
-                self._edit_row = table.cursor_row
-                self.push_screen(EditDayScreen(entry), self._on_edit_complete)
+                self._navigate_to_day_view(selected_date)
+        elif self.view_mode == "day":
+            # In day view, selecting an allocation opens edit
+            if event.row_key:
+                ticket_id = str(event.row_key.value)
+                self._edit_allocation(ticket_id)
 
     def action_populate_holidays(self):
         """Pre-populate UK bank holidays for the company year (year view only)."""
@@ -1281,19 +2103,36 @@ class TimesheetApp(App):
         self.notify(f"Added {total_count} holiday entries" if total_count else "No new holidays to add")
 
     def action_edit_day(self):
-        """Open edit modal for selected day (week view only)."""
-        if self.view_mode != "week":
-            return
-        table = self.query_one("#week-table", DataTable)
-        current_row = table.cursor_row
-        row_key = table.coordinate_to_cell_key(Coordinate(current_row, 0)).row_key
+        """Open edit modal for selected day."""
+        if self.view_mode == "week":
+            table = self.query_one("#week-table", DataTable)
+            current_row = table.cursor_row
+            row_key = table.coordinate_to_cell_key(Coordinate(current_row, 0)).row_key
 
-        if row_key:
-            selected_date = date.fromisoformat(str(row_key.value))
-            entry = self._get_or_create_entry(selected_date)
-            # Store current row for advancing after edit
-            self._edit_row = current_row
-            self.push_screen(EditDayScreen(entry), self._on_edit_complete)
+            if row_key:
+                selected_date = date.fromisoformat(str(row_key.value))
+                entry = self._get_or_create_entry(selected_date)
+                # Store current row for advancing after edit
+                self._edit_row = current_row
+                self.push_screen(EditDayScreen(entry), self._on_edit_complete)
+        elif self.view_mode == "day" and self.day_view_date:
+            # In day view, edit the current day's time entry
+            entry = storage.get_entry(self.day_view_date)
+            if not entry:
+                entry = TimeEntry(
+                    date=self.day_view_date,
+                    day_of_week=self.day_view_date.strftime("%a"),
+                )
+            self.push_screen(EditDayScreen(entry), self._on_day_edit_complete)
+
+    def _on_day_edit_complete(self, result: TimeEntry | None) -> None:
+        """Handle result from edit modal in day view."""
+        if result:
+            storage.save_entry(result)
+            # Also update local cache if in current month
+            if result.date.year == self.current_year and result.date.month == self.current_month:
+                self.entries[result.date] = result
+            self._refresh_display()
 
     def _on_edit_complete(self, result: TimeEntry | None) -> None:
         """Handle result from edit modal."""
