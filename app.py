@@ -27,22 +27,22 @@ from widgets import CombinedHeader, DayHeader, DaySummary, DayTimeEntry, WeeklyS
 
 
 class TimesheetDataTable(DataTable):
-    """Custom DataTable that delegates left/right keys to the app for navigation in week/month views."""
+    """Custom DataTable that delegates left/right keys to the app for navigation in week/month/day views."""
 
     def on_key(self, event) -> None:
-        """Handle key events - intercept left/right in week/month views, 'c' in allocations."""
+        """Handle key events - intercept left/right in week/month/day views, 'c' in allocations."""
         if not hasattr(self.app, 'view_mode'):
             return  # Let default handling occur
 
         view_mode = self.app.view_mode  # type: ignore[attr-defined]
 
-        if event.key == "left" and view_mode in ("week", "month"):
+        if event.key == "left" and view_mode in ("week", "month", "day"):
             if hasattr(self.app, 'action_prev_week'):
                 self.app.action_prev_week()  # type: ignore[attr-defined]
             self.scroll_x = 0
             event.prevent_default()
             event.stop()
-        elif event.key == "right" and view_mode in ("week", "month"):
+        elif event.key == "right" and view_mode in ("week", "month", "day"):
             if hasattr(self.app, 'action_next_week'):
                 self.app.action_next_week()  # type: ignore[attr-defined]
             self.scroll_x = 0
