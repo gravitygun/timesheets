@@ -528,7 +528,7 @@ class TicketManagementScreen(ModalScreen[None]):
         table.add_column("Description", width=40)
         table.add_column("Status", width=10)
         self._refresh_table()
-        table.focus()
+        self.query_one("#tickets-search", Input).focus()
 
     def _refresh_table(self, search: str = "") -> None:
         """Refresh the ticket table."""
@@ -556,8 +556,8 @@ class TicketManagementScreen(ModalScreen[None]):
 
     def on_key(self, event) -> None:
         """Handle key events for navigation."""
-        # Move to table on down arrow from search input
-        if event.key == "down":
+        # Move to table on down arrow or enter from search input
+        if event.key in ("down", "enter"):
             search_input = self.query_one("#tickets-search", Input)
             if search_input.has_focus:
                 self.query_one("#tickets-table", DataTable).focus()
@@ -570,6 +570,11 @@ class TicketManagementScreen(ModalScreen[None]):
             self.show_archived = event.value
             search = self.query_one("#tickets-search", Input).value
             self._refresh_table(search)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Handle Enter on table row - edit the ticket."""
+        if event.control.id == "tickets-table":
+            self.action_edit_ticket()
 
     def _get_selected_ticket_id(self) -> str | None:
         """Get the currently selected ticket ID."""
