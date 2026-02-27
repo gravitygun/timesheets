@@ -1195,7 +1195,8 @@ class TimesheetApp(App):
             else:
                 # Right-justify all day headers for consistency (extra width for circle icon)
                 table.add_column(f"{day:>5}", width=5)
-        table.add_column("Total", width=6)
+        table.add_column("Alloc", width=6)
+        table.add_column("Entered", width=7)
 
         # Add rows for each ticket
         for ticket_id in ticket_ids:
@@ -1203,6 +1204,7 @@ class TimesheetApp(App):
             desc = ticket.description[:18] if ticket else ""
             row_data: list[str | Text] = [ticket_id, desc]
             row_total = Decimal("0")
+            row_entered = Decimal("0")
 
             for day in days_to_show:
                 d = date(self.current_year, self.current_month, day)
@@ -1216,6 +1218,7 @@ class TimesheetApp(App):
                     # Check entered state for icon and styling
                     alloc = alloc_lookup.get((ticket_id, d))
                     if alloc and alloc.entered_on_client:
+                        row_entered += hours
                         icon = "●"
                         icon_style = "dim green" if is_weekend else "green"
                     else:
@@ -1239,6 +1242,8 @@ class TimesheetApp(App):
                 row_data.append(cell)
 
             row_data.append(Text(f"{float(row_total):g}", style="bold"))
+            entered_style = "bold" if row_entered == row_total else "bold red"
+            row_data.append(Text(f"{float(row_entered):g}", style=entered_style))
             table.add_row(*row_data, key=ticket_id)
 
         # Add summary rows: Worked, Status, and Week Total
@@ -1247,6 +1252,7 @@ class TimesheetApp(App):
         week_total_row: list[str | Text] = ["Wk Tot", ""]
         week_total = Decimal("0")
         month_total = Decimal("0")
+        month_entered = Decimal("0")
 
         for day in days_to_show:
             d = date(self.current_year, self.current_month, day)
@@ -1259,6 +1265,12 @@ class TimesheetApp(App):
             if entry:
                 week_total += entry.worked_hours
                 month_total += entry.worked_hours
+
+            # Accumulate entered hours for the day across all tickets
+            for tid in ticket_ids:
+                alloc = alloc_lookup.get((tid, d))
+                if alloc and alloc.entered_on_client:
+                    month_entered += alloc.hours
 
             if worked > 0:
                 content = f"{float(worked):g}"
@@ -1299,9 +1311,13 @@ class TimesheetApp(App):
                 cell.append("     ", style="dim")
                 week_total_row.append(cell)
 
-        worked_row.append(Text(""))  # No total for worked row
-        status_row.append(Text(""))  # No total for status row
-        week_total_row.append(Text(f"{float(month_total):g}", style="bold"))  # Month grand total
+        total_allocated = sum((a.hours for a in allocations), Decimal("0"))
+
+        worked_row.extend([Text(""), Text("")])
+        status_row.extend([Text(""), Text("")])
+        entered_style = "bold" if month_entered == total_allocated else "bold red"
+        week_total_row.append(Text(f"{float(month_total):g}", style="bold"))
+        week_total_row.append(Text(f"{float(month_entered):g}", style=entered_style))
 
         table.add_row(*worked_row, key="__worked__")
         table.add_row(*status_row, key="__status__")
@@ -1312,7 +1328,6 @@ class TimesheetApp(App):
 
         # Update summary
         alloc_summary = self.query_one("#allocations-summary", Static)
-        total_allocated = sum((a.hours for a in allocations), Decimal("0"))
         total_worked = sum((e.worked_hours for e in entries), Decimal("0"))
         mismatch_days = sum(
             1 for day in days_to_show
@@ -1325,6 +1340,8 @@ class TimesheetApp(App):
         text = Text()
         text.append(f"Total allocated: {float(total_allocated):.1f}h")
         text.append(f"   Total worked: {float(total_worked):.1f}h")
+        entered_summary_style = "" if month_entered == total_allocated else "red"
+        text.append(f"   Total entered: {float(month_entered):.1f}h", style=entered_summary_style)
         if mismatch_days > 0:
             text.append(f"   Mismatched days: {mismatch_days}", style="red")
         alloc_summary.update(text)
