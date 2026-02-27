@@ -1,8 +1,9 @@
-"""Tests for utils.py - week calculation utilities."""
+"""Tests for utils.py - week calculation and points utilities."""
 
 from datetime import date
+from decimal import Decimal
 
-from utils import get_week_start, get_weeks_in_month, ADJUST_TYPES
+from utils import get_week_start, get_weeks_in_month, calculate_points, ADJUST_TYPES
 
 
 class TestGetWeekStart:
@@ -150,3 +151,39 @@ class TestAdjustTypes:
             assert len(label) > 0
             if code:  # Non-empty codes should have descriptive labels
                 assert code in label
+
+
+class TestCalculatePoints:
+    """Tests for calculate_points function."""
+
+    def test_zero_hours(self):
+        """Test that zero hours gives zero points."""
+        assert calculate_points(Decimal("0"), Decimal("2")) == 0
+
+    def test_exact_multiple(self):
+        """Test exact multiple of hours_per_point."""
+        assert calculate_points(Decimal("4"), Decimal("2")) == 2
+
+    def test_ceiling_rounding(self):
+        """Test that fractional points round up."""
+        assert calculate_points(Decimal("3"), Decimal("2")) == 2  # ceil(1.5)
+
+    def test_small_fraction(self):
+        """Test small fractional hours still round up to 1 point."""
+        assert calculate_points(Decimal("0.5"), Decimal("2")) == 1  # ceil(0.25)
+
+    def test_just_over_boundary(self):
+        """Test hours just over a point boundary."""
+        assert calculate_points(Decimal("2.1"), Decimal("2")) == 2  # ceil(1.05)
+
+    def test_large_hours(self):
+        """Test with a large number of hours."""
+        assert calculate_points(Decimal("100"), Decimal("2")) == 50
+
+    def test_custom_hours_per_point(self):
+        """Test with a non-default hours_per_point."""
+        assert calculate_points(Decimal("10"), Decimal("3")) == 4  # ceil(3.33)
+
+    def test_negative_hours(self):
+        """Test that negative hours gives zero points."""
+        assert calculate_points(Decimal("-1"), Decimal("2")) == 0

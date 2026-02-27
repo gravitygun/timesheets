@@ -3,7 +3,7 @@
 from datetime import date, time, timedelta
 from decimal import Decimal
 
-from models import TimeEntry, Config, TicketAllocation
+from models import TimeEntry, Config, Ticket, TicketAllocation
 
 
 class TestTimeEntry:
@@ -183,6 +183,38 @@ class TestConfig:
         assert config.currency == "USD"
         assert config.standard_day_hours == Decimal("8")
         assert config.vat_rate == Decimal("0.10")
+
+    def test_default_points_fields(self):
+        """Test default values for points-related config fields."""
+        config = Config()
+        assert config.hours_per_point == Decimal("2")
+        assert config.point_rate == Decimal("210")
+        assert config.points_start_date is None
+
+    def test_custom_points_fields(self):
+        """Test custom values for points-related config fields."""
+        config = Config(
+            hours_per_point=Decimal("3"),
+            point_rate=Decimal("300"),
+            points_start_date=date(2026, 3, 1),
+        )
+        assert config.hours_per_point == Decimal("3")
+        assert config.point_rate == Decimal("300")
+        assert config.points_start_date == date(2026, 3, 1)
+
+
+class TestTicket:
+    """Tests for Ticket dataclass."""
+
+    def test_default_points_entered(self):
+        """Test that points_entered defaults to False."""
+        ticket = Ticket(id="T-1", description="Test")
+        assert ticket.points_entered is False
+
+    def test_points_entered_true(self):
+        """Test creating ticket with points_entered=True."""
+        ticket = Ticket(id="T-1", description="Test", points_entered=True)
+        assert ticket.points_entered is True
 
 
 class TestTicketAllocation:

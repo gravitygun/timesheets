@@ -102,6 +102,7 @@ class TestTicketManagementScreen:
         assert "e" in binding_keys
         assert "a" in binding_keys
         assert "d" in binding_keys
+        assert "p" in binding_keys
 
 
 class TestTicketSelectScreen:

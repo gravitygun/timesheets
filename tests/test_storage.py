@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from models import TimeEntry, Config
+from models import TimeEntry, Config, Ticket, TicketAllocation
 
 
 # We need to set TIMESHEET_DB before importing storage
@@ -403,3 +403,203 @@ class TestHolidays:
         retrieved = storage.get_entry(date(2026, 12, 25))
         assert retrieved.clock_in == time(9, 0)
         assert retrieved.comment == "Worked half day"
+
+
+class TestTicketPointsEntered:
+    """Tests for points_entered flag on tickets."""
+
+    def test_default_points_entered_false(self, temp_database):
+        """Test that points_entered defaults to False when saving a ticket."""
+        storage = temp_database
+        ticket = Ticket(id="T-1", description="Test ticket")
+        storage.save_ticket(ticket)
+
+        retrieved = storage.get_ticket("T-1")
+        assert retrieved is not None
+        assert retrieved.points_entered is False
+
+    def test_save_ticket_with_points_entered(self, temp_database):
+        """Test saving a ticket with points_entered=True."""
+        storage = temp_database
+        ticket = Ticket(id="T-2", description="Done ticket", points_entered=True)
+        storage.save_ticket(ticket)
+
+        retrieved = storage.get_ticket("T-2")
+        assert retrieved is not None
+        assert retrieved.points_entered is True
+
+    def test_set_points_entered_toggle(self, temp_database):
+        """Test toggling points_entered via set_points_entered."""
+        storage = temp_database
+        ticket = Ticket(id="T-3", description="Toggle test")
+        storage.save_ticket(ticket)
+
+        # Initially false
+        assert storage.get_ticket("T-3").points_entered is False
+
+        # Set to true
+        storage.set_points_entered("T-3", True)
+        assert storage.get_ticket("T-3").points_entered is True
+
+        # Set back to false
+        storage.set_points_entered("T-3", False)
+        assert storage.get_ticket("T-3").points_entered is False
+
+    def test_set_points_entered_preserves_other_fields(self, temp_database):
+        """Test that toggling points_entered doesn't affect other ticket fields."""
+        storage = temp_database
+        ticket = Ticket(
+            id="T-4", description="Preserve test", archived=True
+        )
+        storage.save_ticket(ticket)
+
+        storage.set_points_entered("T-4", True)
+        retrieved = storage.get_ticket("T-4")
+
+        assert retrieved.description == "Preserve test"
+        assert retrieved.archived is True
+        assert retrieved.points_entered is True
+
+
+class TestGetTicketLifetimeHours:
+    """Tests for get_ticket_lifetime_hours function."""
+
+    def _create_ticket_and_allocation(
+        self, storage, ticket_id, alloc_date, hours
+    ):
+        """Helper to create a ticket and an allocation."""
+        # Ensure the ticket exists
+        if not storage.get_ticket(ticket_id):
+            storage.save_ticket(Ticket(id=ticket_id, description=f"Ticket {ticket_id}"))
+        storage.save_allocation(
+            TicketAllocation(
+                ticket_id=ticket_id,
+                date=alloc_date,
+                hours=Decimal(str(hours)),
+            )
+        )
+
+    def test_no_allocations(self, temp_database):
+        """Test with no allocations returns empty dict."""
+        storage = temp_database
+        result = storage.get_ticket_lifetime_hours(date(2026, 1, 1))
+        assert result == {}
+
+    def test_allocations_before_start_date_excluded(self, temp_database):
+        """Test that allocations before start_date are not counted."""
+        storage = temp_database
+        self._create_ticket_and_allocation(
+            storage, "T-1", date(2026, 2, 28), "4.0"
+        )
+
+        result = storage.get_ticket_lifetime_hours(date(2026, 3, 1))
+        assert result == {}
+
+    def test_allocations_on_start_date_included(self, temp_database):
+        """Test that allocations on start_date are counted."""
+        storage = temp_database
+        self._create_ticket_and_allocation(
+            storage, "T-1", date(2026, 3, 1), "3.5"
+        )
+
+        result = storage.get_ticket_lifetime_hours(date(2026, 3, 1))
+        assert "T-1" in result
+        assert result["T-1"] == Decimal("3.50")
+
+    def test_multiple_tickets(self, temp_database):
+        """Test lifetime hours aggregated across multiple tickets."""
+        storage = temp_database
+        self._create_ticket_and_allocation(
+            storage, "T-1", date(2026, 3, 2), "2.0"
+        )
+        self._create_ticket_and_allocation(
+            storage, "T-1", date(2026, 3, 3), "3.0"
+        )
+        self._create_ticket_and_allocation(
+            storage, "T-2", date(2026, 3, 2), "5.0"
+        )
+
+        result = storage.get_ticket_lifetime_hours(date(2026, 3, 1))
+        assert result["T-1"] == Decimal("5.00")
+        assert result["T-2"] == Decimal("5.00")
+
+    def test_filtered_by_ticket_ids(self, temp_database):
+        """Test filtering by specific ticket IDs."""
+        storage = temp_database
+        self._create_ticket_and_allocation(
+            storage, "T-1", date(2026, 3, 2), "2.0"
+        )
+        self._create_ticket_and_allocation(
+            storage, "T-2", date(2026, 3, 2), "3.0"
+        )
+        self._create_ticket_and_allocation(
+            storage, "T-3", date(2026, 3, 2), "4.0"
+        )
+
+        result = storage.get_ticket_lifetime_hours(
+            date(2026, 3, 1), ticket_ids=["T-1", "T-3"]
+        )
+        assert "T-1" in result
+        assert "T-3" in result
+        assert "T-2" not in result
+
+    def test_hours_summed_across_dates(self, temp_database):
+        """Test that hours are summed across multiple dates for same ticket."""
+        storage = temp_database
+        self._create_ticket_and_allocation(
+            storage, "T-1", date(2026, 3, 2), "1.5"
+        )
+        self._create_ticket_and_allocation(
+            storage, "T-1", date(2026, 3, 3), "2.5"
+        )
+        self._create_ticket_and_allocation(
+            storage, "T-1", date(2026, 3, 4), "1.0"
+        )
+
+        result = storage.get_ticket_lifetime_hours(date(2026, 3, 1))
+        assert result["T-1"] == Decimal("5.00")
+
+
+class TestConfigPointsStorage:
+    """Tests for points-related config persistence."""
+
+    def test_seeded_points_start_date(self, temp_database):
+        """Test that init_db seeds points_start_date to 2026-03-01."""
+        storage = temp_database
+        config = storage.get_config()
+        assert config.points_start_date == date(2026, 3, 1)
+
+    def test_save_and_load_points_config(self, temp_database):
+        """Test saving and loading points-related config fields."""
+        storage = temp_database
+        config = Config(
+            hours_per_point=Decimal("3"),
+            point_rate=Decimal("300"),
+            points_start_date=date(2026, 4, 1),
+        )
+        storage.save_config(config)
+
+        retrieved = storage.get_config()
+        assert retrieved.hours_per_point == Decimal("3")
+        assert retrieved.point_rate == Decimal("300")
+        assert retrieved.points_start_date == date(2026, 4, 1)
+
+    def test_points_start_date_none(self, temp_database):
+        """Test saving and loading points_start_date as None."""
+        storage = temp_database
+        config = Config(points_start_date=None)
+        storage.save_config(config)
+
+        retrieved = storage.get_config()
+        assert retrieved.points_start_date is None
+
+    def test_default_points_config_values(self, temp_database):
+        """Test default values for points config after clearing."""
+        storage = temp_database
+        # Save config with no points start date to override the seed
+        config = Config(points_start_date=None)
+        storage.save_config(config)
+
+        retrieved = storage.get_config()
+        assert retrieved.hours_per_point == Decimal("2")
+        assert retrieved.point_rate == Decimal("210")
