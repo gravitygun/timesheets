@@ -3,7 +3,7 @@
 from datetime import date, time, timedelta
 from decimal import Decimal
 
-from models import TimeEntry, Config
+from models import TimeEntry, Config, TicketAllocation
 
 
 class TestTimeEntry:
@@ -183,3 +183,39 @@ class TestConfig:
         assert config.currency == "USD"
         assert config.standard_day_hours == Decimal("8")
         assert config.vat_rate == Decimal("0.10")
+
+
+class TestTicketAllocation:
+    """Tests for TicketAllocation dataclass."""
+
+    def test_defaults(self):
+        """Test default values for optional fields."""
+        alloc = TicketAllocation(
+            ticket_id="PROJ-1",
+            date=date(2026, 1, 15),
+            hours=Decimal("4.5"),
+        )
+        assert alloc.description is None
+        assert alloc.entered_on_client is False
+
+    def test_with_description(self):
+        """Test allocation with a description."""
+        alloc = TicketAllocation(
+            ticket_id="PROJ-1",
+            date=date(2026, 1, 15),
+            hours=Decimal("4.5"),
+            description="Implemented feature X",
+        )
+        assert alloc.description == "Implemented feature X"
+
+    def test_with_multiline_description(self):
+        """Test allocation with multiline description."""
+        desc = "Line one\nLine two\nLine three"
+        alloc = TicketAllocation(
+            ticket_id="PROJ-1",
+            date=date(2026, 1, 15),
+            hours=Decimal("2.0"),
+            description=desc,
+        )
+        assert alloc.description == desc
+        assert alloc.description.count("\n") == 2

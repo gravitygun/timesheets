@@ -135,6 +135,7 @@ class TestEditAllocationScreen:
         assert screen.ticket == ticket
         assert screen.current_hours == ""
         assert screen.remaining_hours == "7.5"
+        assert screen.current_description == ""
 
     def test_init_edit_allocation(self):
         """Test EditAllocationScreen for editing existing allocation."""
@@ -146,10 +147,24 @@ class TestEditAllocationScreen:
             ticket=ticket,
             current_hours="4.5",
             remaining_hours="3.0",
+            current_description="Did some work",
         )
 
         assert screen.current_hours == "4.5"
         assert screen.remaining_hours == "3.0"
+        assert screen.current_description == "Did some work"
+
+    def test_init_multiline_description(self):
+        """Test EditAllocationScreen with multiline description."""
+        ticket = Ticket(id="TEST", description="Test")
+        desc = "Line one\nLine two\nLine three"
+        screen = EditAllocationScreen(
+            ticket=ticket,
+            current_hours="2.0",
+            current_description=desc,
+        )
+
+        assert screen.current_description == desc
 
     def test_bindings_defined(self):
         """Test that escape binding is defined."""

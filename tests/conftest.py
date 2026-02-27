@@ -115,6 +115,7 @@ def sample_allocation():
         ticket_id="PROJ-123",
         date=date(2026, 1, 27),
         hours=Decimal("4.5"),
+        description="Worked on feature X",
     )
 
 
