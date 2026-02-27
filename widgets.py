@@ -193,3 +193,24 @@ class DaySummary(Static):
         text.append("                                             Status: ")
         text.append(status, style=status_style)
         self.update(text)
+
+
+class DayDescription(Static):
+    """Pane showing the description of the selected allocation."""
+
+    def update_display(
+        self,
+        ticket_id: str,
+        ticket_description: str,
+        alloc_description: str,
+    ) -> None:
+        """Update the description display for the selected allocation."""
+        text = Text()
+        text.append("Work description: ", style="bold")
+        text.append(f"{ticket_id}: {ticket_description}\n", style="bold")
+        text.append(alloc_description or "(no description)")
+        self.update(text)
+
+    def clear_display(self) -> None:
+        """Clear the description pane."""
+        self.update("")
