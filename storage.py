@@ -81,6 +81,25 @@ def init_db():
         conn.execute(
             "ALTER TABLE ticket_allocations ADD COLUMN description TEXT"
         )
+
+    # Migration: Add points_entered column to tickets if it doesn't exist
+    cursor = conn.execute("PRAGMA table_info(tickets)")
+    ticket_columns = [row[1] for row in cursor.fetchall()]
+    if "points_entered" not in ticket_columns:
+        conn.execute(
+            "ALTER TABLE tickets ADD COLUMN points_entered INTEGER DEFAULT 0"
+        )
+
+    # Seed points_start_date config if not yet set
+    row = conn.execute(
+        "SELECT value FROM config WHERE key = 'points_start_date'"
+    ).fetchone()
+    if not row:
+        conn.execute(
+            "INSERT INTO config (key, value) VALUES (?, ?)",
+            ("points_start_date", "2026-03-01"),
+        )
+
     conn.commit()
     conn.close()
 
@@ -188,6 +207,14 @@ def get_config() -> Config:
             config.standard_day_hours = Decimal(row["value"])
         elif row["key"] == "vat_rate":
             config.vat_rate = Decimal(row["value"])
+        elif row["key"] == "hours_per_point":
+            config.hours_per_point = Decimal(row["value"])
+        elif row["key"] == "point_rate":
+            config.point_rate = Decimal(row["value"])
+        elif row["key"] == "points_start_date":
+            config.points_start_date = (
+                date.fromisoformat(row["value"]) if row["value"] else None
+            )
 
     return config
 
@@ -203,6 +230,13 @@ def save_config(config: Config):
                  ("standard_day_hours", str(config.standard_day_hours)))
     conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
                  ("vat_rate", str(config.vat_rate)))
+    conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                 ("hours_per_point", str(config.hours_per_point)))
+    conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                 ("point_rate", str(config.point_rate)))
+    conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                 ("points_start_date",
+                  config.points_start_date.isoformat() if config.points_start_date else ""))
     conn.commit()
     conn.close()
 
@@ -272,11 +306,13 @@ def populate_holidays(year: int, month: int, standard_hours: Decimal) -> int:
 
 def _row_to_ticket(row: sqlite3.Row) -> Ticket:
     """Convert a database row to a Ticket object."""
+    keys = row.keys()
     return Ticket(
         id=row["id"],
         description=row["description"],
         archived=bool(row["archived"]),
         created_at=date.fromisoformat(row["created_at"]) if row["created_at"] else None,
+        points_entered=bool(row["points_entered"]) if "points_entered" in keys else False,
     )
 
 
@@ -286,10 +322,17 @@ def save_ticket(ticket: Ticket) -> None:
     created_at = ticket.created_at or date.today()
     conn.execute(
         """
-        INSERT OR REPLACE INTO tickets (id, description, archived, created_at)
-        VALUES (?, ?, ?, ?)
+        INSERT OR REPLACE INTO tickets
+            (id, description, archived, created_at, points_entered)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (ticket.id, ticket.description, int(ticket.archived), created_at.isoformat()),
+        (
+            ticket.id,
+            ticket.description,
+            int(ticket.archived),
+            created_at.isoformat(),
+            int(ticket.points_entered),
+        ),
     )
     conn.commit()
     conn.close()
@@ -382,6 +425,59 @@ def unarchive_ticket(ticket_id: str) -> None:
     conn.execute("UPDATE tickets SET archived = 0 WHERE id = ?", (ticket_id,))
     conn.commit()
     conn.close()
+
+
+def set_points_entered(ticket_id: str, entered: bool) -> None:
+    """Set whether points have been entered in Jira for a ticket."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE tickets SET points_entered = ? WHERE id = ?",
+        (int(entered), ticket_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_ticket_lifetime_hours(
+    start_date: date,
+    ticket_ids: list[str] | None = None,
+) -> dict[str, Decimal]:
+    """Get total allocated hours per ticket from start_date onwards.
+
+    Args:
+        start_date: Only count hours on or after this date.
+        ticket_ids: If provided, only return hours for these tickets.
+
+    Returns:
+        Dict mapping ticket_id to total hours.
+    """
+    conn = get_connection()
+    if ticket_ids:
+        placeholders = ",".join("?" * len(ticket_ids))
+        rows = conn.execute(
+            f"""
+            SELECT ticket_id, SUM(CAST(hours AS REAL)) as total
+            FROM ticket_allocations
+            WHERE date >= ? AND ticket_id IN ({placeholders})
+            GROUP BY ticket_id
+            """,
+            [start_date.isoformat(), *ticket_ids],
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT ticket_id, SUM(CAST(hours AS REAL)) as total
+            FROM ticket_allocations
+            WHERE date >= ?
+            GROUP BY ticket_id
+            """,
+            (start_date.isoformat(),),
+        ).fetchall()
+    conn.close()
+    return {
+        row["ticket_id"]: Decimal(str(row["total"])).quantize(Decimal("0.01"))
+        for row in rows
+    }
 
 
 # --- Ticket Allocation Functions ---

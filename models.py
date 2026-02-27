@@ -48,6 +48,9 @@ class Config:
     currency: str = "GBP"
     standard_day_hours: Decimal = Decimal("7.5")
     vat_rate: Decimal = Decimal("0.20")
+    hours_per_point: Decimal = Decimal("2")
+    point_rate: Decimal = Decimal("210")
+    points_start_date: date | None = None
 
 
 @dataclass
@@ -58,6 +61,7 @@ class Ticket:
     description: str
     archived: bool = False
     created_at: date | None = None
+    points_entered: bool = False
 
 
 @dataclass
