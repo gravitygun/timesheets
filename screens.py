@@ -496,6 +496,7 @@ class TicketManagementScreen(ModalScreen[None]):
         Binding("n", "new_ticket", "New"),
         Binding("e", "edit_ticket", "Edit"),
         Binding("a", "toggle_archive", "Archive"),
+        Binding("p", "toggle_points_entered", "Pts Entered"),
         Binding("d", "delete_ticket", "Delete"),
     ]
 
@@ -517,6 +518,7 @@ class TicketManagementScreen(ModalScreen[None]):
                 yield Button("New [n]", id="btn-new")
                 yield Button("Edit [e]", id="btn-edit")
                 yield Button("Archive [a]", id="btn-archive")
+                yield Button("Pts Entered [p]", id="btn-pts-entered")
                 yield Button("Delete [d]", id="btn-delete")
                 yield Button("Close [Esc]", id="btn-close")
 
@@ -527,6 +529,7 @@ class TicketManagementScreen(ModalScreen[None]):
         table.add_column("ID", width=10)
         table.add_column("Description", width=40)
         table.add_column("Status", width=10)
+        table.add_column("Pts Entered", width=12)
         self._refresh_table()
         self.query_one("#tickets-search", Input).focus()
 
@@ -542,10 +545,12 @@ class TicketManagementScreen(ModalScreen[None]):
 
         for ticket in tickets:
             status = "Archived" if ticket.archived else "Active"
+            pts_entered = "Yes" if ticket.points_entered else ""
             table.add_row(
                 ticket.id,
                 ticket.description[:40],
                 status,
+                pts_entered,
                 key=ticket.id,
             )
 
@@ -596,6 +601,8 @@ class TicketManagementScreen(ModalScreen[None]):
             self.action_edit_ticket()
         elif button_id == "btn-archive":
             self.action_toggle_archive()
+        elif button_id == "btn-pts-entered":
+            self.action_toggle_points_entered()
         elif button_id == "btn-delete":
             self.action_delete_ticket()
         elif button_id == "btn-close":
@@ -639,6 +646,22 @@ class TicketManagementScreen(ModalScreen[None]):
             else:
                 storage.archive_ticket(ticket_id)
                 self.app.notify(f"Ticket {ticket_id} archived")
+            search = self.query_one("#tickets-search", Input).value
+            self._refresh_table(search)
+
+    def action_toggle_points_entered(self) -> None:
+        """Toggle whether points have been entered in Jira for the selected ticket."""
+        ticket_id = self._get_selected_ticket_id()
+        if not ticket_id:
+            self.app.notify("No ticket selected", severity="warning")
+            return
+
+        ticket = storage.get_ticket(ticket_id)
+        if ticket:
+            new_state = not ticket.points_entered
+            storage.set_points_entered(ticket_id, new_state)
+            status = "entered" if new_state else "not entered"
+            self.app.notify(f"Ticket {ticket_id}: points {status}")
             search = self.query_one("#tickets-search", Input).value
             self._refresh_table(search)
 
