@@ -23,7 +23,7 @@ from screens import (
     TicketManagementScreen,
     TicketSelectScreen,
 )
-from widgets import CombinedHeader, DayHeader, DaySummary, DayTimeEntry, WeeklySummary
+from widgets import CombinedHeader, DayDescription, DayHeader, DaySummary, DayTimeEntry, WeeklySummary
 
 
 class TimesheetDataTable(DataTable):
@@ -48,13 +48,22 @@ class TimesheetDataTable(DataTable):
             self.scroll_x = 0
             event.prevent_default()
             event.stop()
-        elif event.key == "c" and view_mode == "allocations":
-            # Toggle entered state with 'c' key
+        elif event.key in ("c", "enter") and view_mode == "allocations":
+            # Toggle entered state with 'c' or Enter key
             if hasattr(self.app, '_toggle_allocation_entered_state'):
                 self.app._toggle_allocation_entered_state()  # type: ignore[attr-defined]
             event.prevent_default()
             event.stop()
         # For other keys/views, don't intercept - let DataTable handle normally
+
+    def on_click(self, event) -> None:
+        """Toggle entered state on double click in allocations view."""
+        if not hasattr(self.app, 'view_mode'):
+            return
+        view_mode = self.app.view_mode  # type: ignore[attr-defined]
+        if view_mode == "allocations" and event.chain >= 2:
+            if hasattr(self.app, '_toggle_allocation_entered_state'):
+                self.app._toggle_allocation_entered_state()  # type: ignore[attr-defined]
 
 
 class TimesheetApp(App):
@@ -147,10 +156,31 @@ class TimesheetApp(App):
         color: $text;
     }
 
+    #day-table-container {
+        height: 2fr;
+    }
+
     #day-summary {
         height: auto;
         padding: 1 2;
         color: $text;
+    }
+
+    #day-description {
+        height: 1fr;
+        min-height: 3;
+        padding: 0 2;
+        color: $text;
+        border-top: solid $primary;
+    }
+
+    #alloc-description {
+        height: auto;
+        min-height: 3;
+        max-height: 8;
+        padding: 0 2;
+        color: $text;
+        border-top: solid $primary;
     }
 
     DataTable {
@@ -295,10 +325,12 @@ class TimesheetApp(App):
         yield DayHeader(id="day-header", classes="hidden")
         yield DayTimeEntry(id="day-time-entry", classes="hidden")
         yield Container(TimesheetDataTable(id="day-table"), id="day-table-container", classes="hidden")
+        yield DayDescription(id="day-description", classes="hidden")
         yield DaySummary(id="day-summary", classes="hidden")
         # Allocations report widgets (hidden by default)
         yield Static(id="allocations-header", classes="hidden")
         yield Container(TimesheetDataTable(id="allocations-table"), id="allocations-table-container", classes="hidden")
+        yield DayDescription(id="alloc-description", classes="hidden")
         yield Static(id="allocations-summary", classes="hidden")
         yield Footer()
 
@@ -366,8 +398,9 @@ class TimesheetApp(App):
         table = self.query_one("#day-table", DataTable)
         table.cursor_type = "row"
         table.add_column("Ticket", width=10)
-        table.add_column("Description", width=40)
+        table.add_column("Ticket Desc", width=25)
         table.add_column("Hours", width=8)
+        table.add_column("Description", width=35)
         table.add_column("Entered", width=7)
 
     def _setup_allocations_table(self):
@@ -1016,12 +1049,14 @@ class TimesheetApp(App):
 
         for alloc in self.day_allocations:
             ticket = storage.get_ticket(alloc.ticket_id)
-            desc = ticket.description[:40] if ticket else "(unknown)"
+            desc = ticket.description[:25] if ticket else "(unknown)"
+            alloc_desc = (alloc.description or "").split("\n")[0][:35]
             entered = Text("✓", style="green") if alloc.entered_on_client else Text("-", style="dim")
             table.add_row(
                 alloc.ticket_id,
                 desc,
                 f"{float(alloc.hours):.2f}h",
+                alloc_desc,
                 entered,
                 key=alloc.ticket_id,
             )
@@ -1032,6 +1067,19 @@ class TimesheetApp(App):
         # Update day summary
         day_summary = self.query_one("#day-summary", DaySummary)
         day_summary.update_display(total_allocated, worked_hours)
+
+        # Update description pane for first row
+        day_desc = self.query_one("#day-description", DayDescription)
+        if self.day_allocations:
+            alloc = self.day_allocations[0]
+            ticket = storage.get_ticket(alloc.ticket_id)
+            day_desc.update_display(
+                alloc.ticket_id,
+                ticket.description if ticket else "(unknown)",
+                alloc.description or "",
+            )
+        else:
+            day_desc.clear_display()
 
     def _get_allocation_status(self, d: date, worked_hours: Decimal) -> Text:
         """Get the allocation status indicator for a day.
@@ -1259,6 +1307,9 @@ class TimesheetApp(App):
         table.add_row(*status_row, key="__status__")
         table.add_row(*week_total_row, key="__week_total__")
 
+        # Clear description pane on refresh
+        self.query_one("#alloc-description", DayDescription).clear_display()
+
         # Update summary
         alloc_summary = self.query_one("#allocations-summary", Static)
         total_allocated = sum((a.hours for a in allocations), Decimal("0"))
@@ -1297,9 +1348,9 @@ class TimesheetApp(App):
         # Year view widgets
         year_widgets = ["#year-header", "#year-table-container", "#year-earnings", "#year-summary"]
         # Day view widgets
-        day_widgets = ["#day-header", "#day-time-entry", "#day-table-container", "#day-summary"]
+        day_widgets = ["#day-header", "#day-time-entry", "#day-table-container", "#day-summary", "#day-description"]
         # Allocations report widgets
-        alloc_widgets = ["#allocations-header", "#allocations-table-container", "#allocations-summary"]
+        alloc_widgets = ["#allocations-header", "#allocations-table-container", "#alloc-description", "#allocations-summary"]
 
         for widget_id in week_widgets:
             widget = self.query_one(widget_id)
@@ -1624,6 +1675,7 @@ class TimesheetApp(App):
             ticket_id=alloc.ticket_id,
             date=alloc.date,
             hours=alloc.hours,
+            description=alloc.description,
             entered_on_client=new_value,
         )
         storage.save_allocation(updated_alloc)
@@ -1902,22 +1954,24 @@ class TimesheetApp(App):
                 ticket,
                 current_hours=str(alloc.hours),
                 remaining_hours=str(remaining),
+                current_description=alloc.description or "",
             ),
             self._on_allocation_edited,
         )
 
-    def _on_allocation_edited(self, result: tuple[str, str] | None) -> None:
+    def _on_allocation_edited(self, result: tuple[str, str, str] | None) -> None:
         """Handle allocation edit result."""
         # Use the captured target date, not day_view_date (which may have changed)
         target_date = getattr(self, '_allocation_target_date', None)
         if result and target_date:
-            ticket_id, hours_str = result
+            ticket_id, hours_str, description = result
             hours = Decimal(hours_str)
             if hours > 0:
                 alloc = TicketAllocation(
                     ticket_id=ticket_id,
                     date=target_date,
                     hours=hours,
+                    description=description or None,
                 )
                 storage.save_allocation(alloc)
                 self.notify(f"Allocated {hours}h to {ticket_id}")
@@ -1927,12 +1981,32 @@ class TimesheetApp(App):
                 self.notify(f"Removed allocation for {ticket_id}")
             self._refresh_display()
 
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Update description pane when cursor moves in day view."""
+        if self.view_mode != "day":
+            return
+        row_key = event.row_key
+        if not row_key:
+            return
+        ticket_id = str(row_key.value)
+        alloc = next((a for a in self.day_allocations if a.ticket_id == ticket_id), None)
+        if not alloc:
+            return
+        ticket = storage.get_ticket(ticket_id)
+        day_desc = self.query_one("#day-description", DayDescription)
+        day_desc.update_display(
+            ticket_id,
+            ticket.description if ticket else "(unknown)",
+            alloc.description or "",
+        )
+
     def on_data_table_cell_highlighted(self, event: DataTable.CellHighlighted) -> None:
-        """Highlight the ticket ID when cursor moves to any cell in that row."""
+        """Highlight the ticket ID and update description pane when cursor moves in allocations view."""
         if self.view_mode != "allocations":
             return
 
         table = self.query_one("#allocations-table", DataTable)
+        alloc_desc = self.query_one("#alloc-description", DayDescription)
         row_key = event.cell_key.row_key
 
         # Skip if no row key or if it's a summary row
@@ -1942,22 +2016,46 @@ class TimesheetApp(App):
             if prev_row:
                 self._restore_ticket_cell(table, prev_row)
                 self._alloc_highlighted_row = None
+            alloc_desc.clear_display()
             return
 
         ticket_id = str(row_key.value)
         prev_row = getattr(self, '_alloc_highlighted_row', None)
 
-        # If same row, nothing to do
-        if prev_row == ticket_id:
-            return
-
-        # Restore previous row's ticket cell
-        if prev_row:
+        # Restore previous row's ticket cell if different
+        if prev_row and prev_row != ticket_id:
             self._restore_ticket_cell(table, prev_row)
 
         # Highlight current row's ticket cell
-        self._highlight_ticket_cell(table, ticket_id)
-        self._alloc_highlighted_row = ticket_id
+        if prev_row != ticket_id:
+            self._highlight_ticket_cell(table, ticket_id)
+            self._alloc_highlighted_row = ticket_id
+
+        # Update description pane if cursor is on a day column with an allocation
+        days_to_show = getattr(self, '_alloc_days_to_show', [])
+        day_col_start = 2
+        day_col_end = day_col_start + len(days_to_show)
+        cursor_col = table.cursor_column
+
+        if day_col_start <= cursor_col < day_col_end:
+            day_index = cursor_col - day_col_start
+            day = days_to_show[day_index]
+            d = date(self.current_year, self.current_month, day)
+            alloc = next(
+                (a for a in storage.get_allocations_for_date(d) if a.ticket_id == ticket_id),
+                None,
+            )
+            if alloc:
+                ticket = storage.get_ticket(ticket_id)
+                alloc_desc.update_display(
+                    ticket_id,
+                    ticket.description if ticket else "(unknown)",
+                    alloc.description or "",
+                )
+            else:
+                alloc_desc.clear_display()
+        else:
+            alloc_desc.clear_display()
 
     def _highlight_ticket_cell(self, table: DataTable, ticket_id: str) -> None:
         """Highlight the ticket ID cell with reverse video style."""
@@ -2022,6 +2120,7 @@ class TimesheetApp(App):
                 ticket_id=alloc.ticket_id,
                 date=alloc.date,
                 hours=alloc.hours,
+                description=alloc.description,
                 entered_on_client=not alloc.entered_on_client,
             )
             storage.save_allocation(updated)
@@ -2034,10 +2133,7 @@ class TimesheetApp(App):
             table.move_cursor(row=cursor_row, column=cursor_col)
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
-        """Handle Enter/click on cell in allocations view to toggle entered state."""
-        if self.view_mode != "allocations":
-            return
-        self._toggle_allocation_entered_state()
+        """Handle cell selection events (no-op for allocations; handled by key/double-click)."""
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle Enter/double-click on table row."""
