@@ -8,7 +8,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.coordinate import Coordinate
-from textual.widgets import Button, Checkbox, DataTable, Input, Label
+from textual.widgets import Button, Checkbox, DataTable, Input, Label, TextArea
 from textual.screen import ModalScreen
 
 from models import Ticket, TimeEntry
@@ -823,10 +823,10 @@ class TicketSelectScreen(ModalScreen[Ticket | None]):
             self.dismiss(result)
 
 
-class EditAllocationScreen(ModalScreen[tuple[str, str] | None]):
+class EditAllocationScreen(ModalScreen[tuple[str, str, str] | None]):
     """Modal screen for editing hours allocated to a ticket.
 
-    Returns (ticket_id, hours_string) or None if cancelled.
+    Returns (ticket_id, hours_string, description) or None if cancelled.
     """
 
     CSS = """
@@ -835,8 +835,11 @@ class EditAllocationScreen(ModalScreen[tuple[str, str] | None]):
     }
 
     #alloc-dialog {
-        width: 52;
-        height: auto;
+        width: 70%;
+        max-width: 80;
+        height: 70%;
+        max-height: 30;
+        min-height: 16;
         padding: 1 2;
         background: $surface;
         border: thick $primary;
@@ -860,6 +863,10 @@ class EditAllocationScreen(ModalScreen[tuple[str, str] | None]):
         margin-bottom: 1;
     }
 
+    #desc-group {
+        height: 1fr;
+    }
+
     .field-label {
         height: 1;
         margin-bottom: 0;
@@ -868,6 +875,12 @@ class EditAllocationScreen(ModalScreen[tuple[str, str] | None]):
 
     .field-group Input {
         width: 100%;
+    }
+
+    #alloc-description {
+        width: 100%;
+        height: 1fr;
+        min-height: 3;
     }
 
     #alloc-remaining {
@@ -899,11 +912,13 @@ class EditAllocationScreen(ModalScreen[tuple[str, str] | None]):
         ticket: Ticket,
         current_hours: str = "",
         remaining_hours: str = "",
+        current_description: str = "",
     ):
         super().__init__()
         self.ticket = ticket
         self.current_hours = current_hours
         self.remaining_hours = remaining_hours
+        self.current_description = current_description
 
     def compose(self) -> ComposeResult:
         title = "Edit Allocation" if self.current_hours else "Add Allocation"
@@ -928,6 +943,13 @@ class EditAllocationScreen(ModalScreen[tuple[str, str] | None]):
                     id="alloc-remaining"
                 )
 
+            with Vertical(classes="field-group", id="desc-group"):
+                yield Label("Description", classes="field-label")
+                yield TextArea(
+                    self.current_description,
+                    id="alloc-description",
+                )
+
             with Horizontal(id="alloc-buttons"):
                 yield Button("Save", variant="primary", id="save")
                 yield Button("Cancel", variant="default", id="cancel")
@@ -937,9 +959,9 @@ class EditAllocationScreen(ModalScreen[tuple[str, str] | None]):
         self.query_one("#alloc-hours", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Save on Enter."""
+        """Move to description on Enter in hours field."""
         if event.input.id == "alloc-hours":
-            self._save()
+            self.query_one("#alloc-description", TextArea).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
@@ -966,4 +988,5 @@ class EditAllocationScreen(ModalScreen[tuple[str, str] | None]):
             self.app.notify("Invalid hours value", severity="error")
             return
 
-        self.dismiss((self.ticket.id, hours_str))
+        description = self.query_one("#alloc-description", TextArea).text.strip()
+        self.dismiss((self.ticket.id, hours_str, description))

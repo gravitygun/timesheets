@@ -75,6 +75,12 @@ def init_db():
         conn.execute(
             "ALTER TABLE ticket_allocations ADD COLUMN entered_on_client INTEGER DEFAULT 0"
         )
+
+    # Migration: Add description column if it doesn't exist
+    if "description" not in columns:
+        conn.execute(
+            "ALTER TABLE ticket_allocations ADD COLUMN description TEXT"
+        )
     conn.commit()
     conn.close()
 
@@ -387,6 +393,7 @@ def _row_to_allocation(row: sqlite3.Row) -> TicketAllocation:
         ticket_id=row["ticket_id"],
         date=date.fromisoformat(row["date"]),
         hours=Decimal(row["hours"]),
+        description=row["description"] if row["description"] else None,
         entered_on_client=bool(row["entered_on_client"]) if row["entered_on_client"] else False,
     )
 
@@ -396,13 +403,15 @@ def save_allocation(allocation: TicketAllocation) -> None:
     conn = get_connection()
     conn.execute(
         """
-        INSERT OR REPLACE INTO ticket_allocations (ticket_id, date, hours, entered_on_client)
-        VALUES (?, ?, ?, ?)
+        INSERT OR REPLACE INTO ticket_allocations
+            (ticket_id, date, hours, description, entered_on_client)
+        VALUES (?, ?, ?, ?, ?)
         """,
         (
             allocation.ticket_id,
             allocation.date.isoformat(),
             str(allocation.hours),
+            allocation.description,
             int(allocation.entered_on_client),
         ),
     )

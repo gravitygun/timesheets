@@ -67,4 +67,5 @@ class TicketAllocation:
     ticket_id: str
     date: date
     hours: Decimal
+    description: str | None = None
     entered_on_client: bool = False
