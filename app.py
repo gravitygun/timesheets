@@ -15,7 +15,7 @@ from rich.text import Text
 
 import storage
 from models import Ticket, TicketAllocation, TimeEntry
-from utils import get_weeks_in_month
+from utils import calculate_points, get_weeks_in_month
 from screens import (
     ConfirmScreen,
     EditAllocationScreen,
@@ -52,6 +52,12 @@ class TimesheetDataTable(DataTable):
             # Toggle entered state with 'c' or Enter key
             if hasattr(self.app, '_toggle_allocation_entered_state'):
                 self.app._toggle_allocation_entered_state()  # type: ignore[attr-defined]
+            event.prevent_default()
+            event.stop()
+        elif event.key == "p" and view_mode == "allocations":
+            # Toggle points entered state
+            if hasattr(self.app, '_toggle_points_entered_state'):
+                self.app._toggle_points_entered_state()  # type: ignore[attr-defined]
             event.prevent_default()
             event.stop()
         # For other keys/views, don't intercept - let DataTable handle normally
@@ -219,6 +225,7 @@ class TimesheetApp(App):
         Binding("escape", "back_to_week", "Back"),
         # Allocations report
         Binding("M", "allocations_view", "Allocs"),
+        Binding("p", "toggle_points_entered", "Pts Entered"),
     ]
 
     def __init__(self):
@@ -1157,6 +1164,22 @@ class TimesheetApp(App):
         # Get all tickets that have allocations this month
         ticket_ids = sorted(ticket_hours.keys())
 
+        # Preload all relevant tickets (avoids per-ticket DB queries in the loop)
+        all_tickets = {
+            t.id: t
+            for t in storage.get_all_tickets(include_archived=True)
+            if t.id in set(ticket_ids)
+        }
+
+        # Points setup
+        config = storage.get_config()
+        show_points = config.points_start_date is not None
+        lifetime_hours: dict[str, Decimal] = {}
+        if show_points and config.points_start_date:
+            lifetime_hours = storage.get_ticket_lifetime_hours(
+                config.points_start_date, ticket_ids=ticket_ids,
+            )
+
         # Calculate optimal ticket column width (min 6, max 10)
         max_ticket_len = max((len(tid) for tid in ticket_ids), default=6)
         ticket_col_width = min(max(max_ticket_len, 6), 10)
@@ -1197,10 +1220,12 @@ class TimesheetApp(App):
                 table.add_column(f"{day:>5}", width=5)
         table.add_column("Alloc", width=6)
         table.add_column("Entered", width=7)
+        if show_points:
+            table.add_column("Pts", width=5)
 
         # Add rows for each ticket
         for ticket_id in ticket_ids:
-            ticket = storage.get_ticket(ticket_id)
+            ticket = all_tickets.get(ticket_id)
             desc = ticket.description[:18] if ticket else ""
             row_data: list[str | Text] = [ticket_id, desc]
             row_total = Decimal("0")
@@ -1244,6 +1269,19 @@ class TimesheetApp(App):
             row_data.append(Text(f"{float(row_total):g}", style="bold"))
             entered_style = "bold" if row_entered == row_total else "bold red"
             row_data.append(Text(f"{float(row_entered):g}", style=entered_style))
+            if show_points:
+                total_lifetime = lifetime_hours.get(ticket_id, Decimal("0"))
+                pts = calculate_points(total_lifetime, config.hours_per_point)
+                if pts > 0:
+                    is_archived = ticket.archived if ticket else False
+                    if is_archived:
+                        label = f"{pts}✓" if ticket and ticket.points_entered else str(pts)
+                        pts_cell = Text(label, style="bold green")
+                    else:
+                        pts_cell = Text(str(pts), style="dim")
+                else:
+                    pts_cell = Text("-", style="dim")
+                row_data.append(pts_cell)
             table.add_row(*row_data, key=ticket_id)
 
         # Add summary rows: Worked, Status, and Week Total
@@ -1319,6 +1357,26 @@ class TimesheetApp(App):
         week_total_row.append(Text(f"{float(month_total):g}", style="bold"))
         week_total_row.append(Text(f"{float(month_entered):g}", style=entered_style))
 
+        # Points totals for summary rows
+        billable_pts = 0
+        speculative_pts = 0
+        if show_points:
+            for tid in ticket_ids:
+                total_lifetime = lifetime_hours.get(tid, Decimal("0"))
+                pts = calculate_points(total_lifetime, config.hours_per_point)
+                ticket_obj = all_tickets.get(tid)
+                if ticket_obj and ticket_obj.archived:
+                    billable_pts += pts
+                else:
+                    speculative_pts += pts
+
+            worked_row.append(Text(""))
+            status_row.append(Text(""))
+            pts_summary = Text()
+            pts_summary.append(f"{billable_pts}", style="bold green")
+            pts_summary.append(f"/{speculative_pts}", style="dim")
+            week_total_row.append(pts_summary)
+
         table.add_row(*worked_row, key="__worked__")
         table.add_row(*status_row, key="__status__")
         table.add_row(*week_total_row, key="__week_total__")
@@ -1344,6 +1402,10 @@ class TimesheetApp(App):
         text.append(f"   Total entered: {float(month_entered):.1f}h", style=entered_summary_style)
         if mismatch_days > 0:
             text.append(f"   Mismatched days: {mismatch_days}", style="red")
+        if show_points:
+            text.append(f"   Billable: {billable_pts} pts", style="bold green")
+            if speculative_pts > 0:
+                text.append(f"   Speculative: {speculative_pts} pts", style="dim")
         alloc_summary.update(text)
 
     def _has_allocation_mismatch(self, d: date, entries_dict: dict) -> bool:
@@ -1454,6 +1516,8 @@ class TimesheetApp(App):
             return True if self.view_mode == "day" else None
         elif action == "allocations_view":
             return self.view_mode != "allocations"
+        elif action == "toggle_points_entered":
+            return True if self.view_mode == "allocations" else None
         return True
 
     def action_prev_week(self):
@@ -1796,6 +1860,10 @@ class TimesheetApp(App):
         if self.view_mode == "week":
             self.last_selected_date = self._get_selected_date()
         self._set_view_mode("allocations")
+
+    def action_toggle_points_entered(self):
+        """Toggle points entered state (binding action)."""
+        self._toggle_points_entered_state()
 
     def action_year_view(self):
         """Switch to year view."""
@@ -2148,6 +2216,38 @@ class TimesheetApp(App):
             self._refresh_display()
             table = self.query_one("#allocations-table", DataTable)
             table.move_cursor(row=cursor_row, column=cursor_col)
+
+    def _toggle_points_entered_state(self) -> None:
+        """Toggle points_entered for the ticket in the currently selected row."""
+        if self.view_mode != "allocations":
+            return
+
+        table = self.query_one("#allocations-table", DataTable)
+        cursor_row = table.cursor_row
+        cursor_col = table.cursor_column
+
+        if cursor_row >= len(table.rows):
+            return
+        row_key = list(table.rows.keys())[cursor_row]
+
+        # Skip summary rows
+        if str(row_key.value).startswith("__"):
+            return
+
+        ticket_id = str(row_key.value)
+        ticket = storage.get_ticket(ticket_id)
+        if not ticket:
+            return
+
+        new_state = not ticket.points_entered
+        storage.set_points_entered(ticket_id, new_state)
+        status = "entered" if new_state else "not entered"
+        self.notify(f"{ticket_id}: points {status}")
+
+        # Refresh and restore cursor position
+        self._refresh_display()
+        table = self.query_one("#allocations-table", DataTable)
+        table.move_cursor(row=cursor_row, column=cursor_col)
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         """Handle cell selection events (no-op for allocations; handled by key/double-click)."""
