@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date, timedelta
+from decimal import Decimal
 from calendar import monthrange
 
 
@@ -36,3 +38,14 @@ ADJUST_TYPES = [
     ("S", "S - Sick"),
     ("T", "T - Training"),
 ]
+
+
+def calculate_points(total_hours: Decimal, hours_per_point: Decimal) -> int:
+    """Calculate points from total hours, ceiling-rounded.
+
+    Points = ceil(total_hours / hours_per_point).
+    Returns 0 if total_hours is zero or negative.
+    """
+    if total_hours <= 0:
+        return 0
+    return math.ceil(float(total_hours) / float(hours_per_point))
