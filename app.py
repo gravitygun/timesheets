@@ -60,7 +60,23 @@ class TimesheetDataTable(DataTable):
                 self.app._toggle_points_entered_state()  # type: ignore[attr-defined]
             event.prevent_default()
             event.stop()
+        elif event.key == "e" and view_mode == "allocations":
+            if hasattr(self.app, '_alloc_edit_allocation'):
+                self.app._alloc_edit_allocation()  # type: ignore[attr-defined]
+            event.prevent_default()
+            event.stop()
+        elif event.key == "a" and view_mode == "allocations":
+            if hasattr(self.app, '_alloc_add_allocation'):
+                self.app._alloc_add_allocation()  # type: ignore[attr-defined]
+            event.prevent_default()
+            event.stop()
+        elif event.key == "d" and view_mode == "allocations":
+            if hasattr(self.app, '_alloc_delete_allocation'):
+                self.app._alloc_delete_allocation()  # type: ignore[attr-defined]
+            event.prevent_default()
+            event.stop()
         # For other keys/views, don't intercept - let DataTable handle normally
+
 
     def on_click(self, event) -> None:
         """Toggle entered state on double click in allocations view."""
@@ -126,6 +142,14 @@ class TimesheetApp(App):
     }
 
     #month-header {
+        height: auto;
+        background: $primary;
+        color: $text;
+        padding: 0 1;
+        text-style: bold;
+    }
+
+    #allocations-header {
         height: auto;
         background: $primary;
         color: $text;
@@ -226,6 +250,8 @@ class TimesheetApp(App):
         # Allocations report
         Binding("M", "allocations_view", "Allocs"),
         Binding("p", "toggle_points_entered", "Pts Entered"),
+        Binding("left_square_bracket", "alloc_prev_month", "[◄ Month", show=False),
+        Binding("right_square_bracket", "alloc_next_month", "Month ►]", show=False),
     ]
 
     def __init__(self):
@@ -1500,14 +1526,14 @@ class TimesheetApp(App):
         elif action == "populate_holidays":
             return self.view_mode == "year"
         elif action == "edit_day":
-            # Show Edit in week view and day view
-            return True if self.view_mode in ("week", "day") else None
+            # Show Edit in week view, day view, and allocations view
+            return True if self.view_mode in ("week", "day", "allocations") else None
         elif action == "add_allocation":
-            # Only show Add in day view
-            return True if self.view_mode == "day" else None
+            # Show Add in day view and allocations view
+            return True if self.view_mode in ("day", "allocations") else None
         elif action == "delete_allocation":
-            # Only show Delete in day view
-            return True if self.view_mode == "day" else None
+            # Show Delete in day view and allocations view
+            return True if self.view_mode in ("day", "allocations") else None
         elif action == "back_to_week":
             # Only show Back in day view
             return True if self.view_mode == "day" else None
@@ -1517,6 +1543,8 @@ class TimesheetApp(App):
         elif action == "allocations_view":
             return self.view_mode != "allocations"
         elif action == "toggle_points_entered":
+            return True if self.view_mode == "allocations" else None
+        elif action in ("alloc_prev_month", "alloc_next_month"):
             return True if self.view_mode == "allocations" else None
         return True
 
@@ -2248,6 +2276,218 @@ class TimesheetApp(App):
         self._refresh_display()
         table = self.query_one("#allocations-table", DataTable)
         table.move_cursor(row=cursor_row, column=cursor_col)
+
+    def _get_alloc_cell_info(self) -> tuple[str | None, date | None]:
+        """Get the ticket_id and date for the current cell in allocations view.
+
+        Returns (ticket_id, cell_date). cell_date is None if cursor is not on a day column.
+        """
+        if self.view_mode != "allocations":
+            return None, None
+
+        table = self.query_one("#allocations-table", DataTable)
+        cursor_row = table.cursor_row
+        cursor_col = table.cursor_column
+
+        if cursor_row >= len(table.rows):
+            return None, None
+
+        row_key = list(table.rows.keys())[cursor_row]
+        if str(row_key.value).startswith("__"):
+            return None, None
+
+        ticket_id = str(row_key.value)
+
+        days_to_show = getattr(self, '_alloc_days_to_show', [])
+        day_col_start = 2
+        day_col_end = day_col_start + len(days_to_show)
+
+        if day_col_start <= cursor_col < day_col_end:
+            day_index = cursor_col - day_col_start
+            day = days_to_show[day_index]
+            d = date(self.current_year, self.current_month, day)
+            return ticket_id, d
+
+        return ticket_id, None
+
+    def _alloc_edit_allocation(self) -> None:
+        """Edit the allocation under the cursor in allocations view."""
+        ticket_id, d = self._get_alloc_cell_info()
+        if not ticket_id or not d:
+            return
+
+        alloc = next(
+            (a for a in storage.get_allocations_for_date(d) if a.ticket_id == ticket_id),
+            None,
+        )
+        if not alloc:
+            self.notify("No allocation to edit", severity="warning")
+            return
+
+        ticket = storage.get_ticket(ticket_id)
+        if not ticket:
+            return
+
+        self._allocation_target_date = d
+
+        # Calculate remaining hours
+        entry = storage.get_entry(d)
+        worked = entry.worked_hours if entry else Decimal("0")
+        day_allocs = storage.get_allocations_for_date(d)
+        total_allocated = sum((a.hours for a in day_allocs), Decimal("0"))
+        remaining = worked - total_allocated + alloc.hours
+
+        # Save cursor position for restoring after edit
+        table = self.query_one("#allocations-table", DataTable)
+        self._alloc_cursor_pos = (table.cursor_row, table.cursor_column)
+
+        self.push_screen(
+            EditAllocationScreen(
+                ticket,
+                current_hours=str(alloc.hours),
+                remaining_hours=str(remaining),
+                current_description=alloc.description or "",
+            ),
+            self._on_alloc_view_edit_complete,
+        )
+
+    def _on_alloc_view_edit_complete(self, result: tuple[str, str, str] | None) -> None:
+        """Handle allocation edit from allocations view."""
+        target_date = getattr(self, '_allocation_target_date', None)
+        if result and target_date:
+            ticket_id, hours_str, description = result
+            hours = Decimal(hours_str)
+            if hours > 0:
+                alloc = TicketAllocation(
+                    ticket_id=ticket_id,
+                    date=target_date,
+                    hours=hours,
+                    description=description or None,
+                )
+                storage.save_allocation(alloc)
+                self.notify(f"Allocated {hours}h to {ticket_id}")
+            else:
+                storage.delete_allocation(ticket_id, target_date)
+                self.notify(f"Removed allocation for {ticket_id}")
+            self._refresh_display()
+
+        # Restore cursor position
+        cursor_pos = getattr(self, '_alloc_cursor_pos', None)
+        if cursor_pos:
+            table = self.query_one("#allocations-table", DataTable)
+            table.move_cursor(row=cursor_pos[0], column=cursor_pos[1])
+
+    def _alloc_add_allocation(self) -> None:
+        """Add an allocation from the allocations view via ticket selector."""
+        # Determine the date from the current cursor column
+        table = self.query_one("#allocations-table", DataTable)
+        cursor_col = table.cursor_column
+        days_to_show = getattr(self, '_alloc_days_to_show', [])
+        day_col_start = 2
+        day_col_end = day_col_start + len(days_to_show)
+
+        if cursor_col < day_col_start or cursor_col >= day_col_end:
+            self.notify("Select a day column to add an allocation", severity="warning")
+            return
+
+        day_index = cursor_col - day_col_start
+        day = days_to_show[day_index]
+        d = date(self.current_year, self.current_month, day)
+
+        self._allocation_target_date = d
+        self._alloc_cursor_pos = (table.cursor_row, table.cursor_column)
+
+        self.push_screen(TicketSelectScreen(), self._on_alloc_ticket_selected)
+
+    def _on_alloc_ticket_selected(self, ticket: Ticket | None) -> None:
+        """Handle ticket selection for new allocation in allocations view."""
+        target_date = getattr(self, '_allocation_target_date', None)
+        if not ticket or not target_date:
+            return
+
+        # Check if already allocated
+        day_allocs = storage.get_allocations_for_date(target_date)
+        existing = next((a for a in day_allocs if a.ticket_id == ticket.id), None)
+        if existing:
+            self.notify(
+                f"{ticket.id} already has an allocation on {target_date.strftime('%b %d')}. Use 'e' to edit.",
+                severity="warning",
+            )
+            return
+
+        # Calculate remaining hours
+        entry = storage.get_entry(target_date)
+        worked = entry.worked_hours if entry else Decimal("0")
+        total_allocated = sum((a.hours for a in day_allocs), Decimal("0"))
+        remaining = worked - total_allocated
+
+        self.push_screen(
+            EditAllocationScreen(
+                ticket,
+                current_hours="",
+                remaining_hours=str(remaining),
+            ),
+            self._on_alloc_view_edit_complete,
+        )
+
+    def _alloc_delete_allocation(self) -> None:
+        """Delete the allocation under the cursor in allocations view."""
+        ticket_id, d = self._get_alloc_cell_info()
+        if not ticket_id or not d:
+            return
+
+        alloc = next(
+            (a for a in storage.get_allocations_for_date(d) if a.ticket_id == ticket_id),
+            None,
+        )
+        if not alloc:
+            self.notify("No allocation to delete", severity="warning")
+            return
+
+        # Save cursor position
+        table = self.query_one("#allocations-table", DataTable)
+        self._alloc_cursor_pos = (table.cursor_row, table.cursor_column)
+
+        self.push_screen(
+            ConfirmScreen(f"Delete allocation for {ticket_id} on {d.strftime('%b %d')}?"),
+            lambda confirmed: self._on_alloc_delete_confirmed(confirmed, ticket_id, d),
+        )
+
+    def _on_alloc_delete_confirmed(self, confirmed: bool | None, ticket_id: str, d: date) -> None:
+        """Handle delete allocation confirmation from allocations view."""
+        if confirmed:
+            storage.delete_allocation(ticket_id, d)
+            self.notify(f"Deleted allocation for {ticket_id} on {d.strftime('%b %d')}")
+            self._refresh_display()
+
+            # Restore cursor position (clamped to valid range)
+            cursor_pos = getattr(self, '_alloc_cursor_pos', None)
+            if cursor_pos:
+                table = self.query_one("#allocations-table", DataTable)
+                row = min(cursor_pos[0], max(0, len(table.rows) - 1))
+                table.move_cursor(row=row, column=cursor_pos[1])
+
+    def action_alloc_prev_month(self) -> None:
+        """Navigate to the previous month in allocations view."""
+        if self.current_month == 1:
+            self.current_year -= 1
+            self.current_month = 12
+        else:
+            self.current_month -= 1
+        self.weeks = get_weeks_in_month(self.current_year, self.current_month)
+        self._load_month_data()
+        self._refresh_display()
+
+    def action_alloc_next_month(self) -> None:
+        """Navigate to the next month in allocations view."""
+        if self.current_month == 12:
+            self.current_year += 1
+            self.current_month = 1
+        else:
+            self.current_month += 1
+        self.weeks = get_weeks_in_month(self.current_year, self.current_month)
+        self._load_month_data()
+        self._refresh_display()
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         """Handle cell selection events (no-op for allocations; handled by key/double-click)."""

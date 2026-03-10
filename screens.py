@@ -904,6 +904,7 @@ class EditAllocationScreen(ModalScreen[tuple[str, str, str] | None]):
         width: 100%;
         height: 1fr;
         min-height: 3;
+        border: tall $primary;
     }
 
     #alloc-remaining {
