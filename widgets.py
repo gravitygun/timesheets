@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from textual.containers import VerticalScroll
 from textual.widgets import Static
 from rich.text import Text
 
@@ -195,8 +196,11 @@ class DaySummary(Static):
         self.update(text)
 
 
-class DayDescription(Static):
-    """Pane showing the description of the selected allocation."""
+class DayDescription(VerticalScroll):
+    """Scrollable pane showing the description of the selected allocation."""
+
+    def compose(self):
+        yield Static(id="day-desc-content")
 
     def update_display(
         self,
@@ -209,8 +213,8 @@ class DayDescription(Static):
         text.append("Work description: ", style="bold")
         text.append(f"{ticket_id}: {ticket_description}\n", style="bold")
         text.append(alloc_description or "(no description)")
-        self.update(text)
+        self.query_one("#day-desc-content", Static).update(text)
 
     def clear_display(self) -> None:
         """Clear the description pane."""
-        self.update("")
+        self.query_one("#day-desc-content", Static).update("")

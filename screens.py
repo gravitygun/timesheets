@@ -859,13 +859,14 @@ class EditAllocationScreen(ModalScreen[tuple[str, str, str] | None]):
 
     #alloc-dialog {
         width: 70%;
-        max-width: 80;
-        height: 70%;
-        max-height: 30;
+        max-width: 90;
+        height: auto;
+        max-height: 75%;
         min-height: 16;
         padding: 1 2;
         background: $surface;
         border: thick $primary;
+        overflow-y: auto;
     }
 
     #alloc-title {
@@ -887,7 +888,8 @@ class EditAllocationScreen(ModalScreen[tuple[str, str, str] | None]):
     }
 
     #desc-group {
-        height: 1fr;
+        height: auto;
+        max-height: 100%;
     }
 
     .field-label {
@@ -902,8 +904,9 @@ class EditAllocationScreen(ModalScreen[tuple[str, str, str] | None]):
 
     #alloc-description {
         width: 100%;
-        height: 1fr;
+        height: auto;
         min-height: 3;
+        max-height: 20;
         border: tall $primary;
     }
 

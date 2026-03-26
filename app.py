@@ -197,17 +197,14 @@ class TimesheetApp(App):
     }
 
     #day-description {
-        height: 1fr;
-        min-height: 3;
+        height: 65%;
         padding: 0 2;
         color: $text;
         border-top: solid $primary;
     }
 
     #alloc-description {
-        height: auto;
-        min-height: 3;
-        max-height: 8;
+        height: 65%;
         padding: 0 2;
         color: $text;
         border-top: solid $primary;
