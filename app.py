@@ -2334,9 +2334,9 @@ class TimesheetApp(App):
         total_allocated = sum((a.hours for a in day_allocs), Decimal("0"))
         remaining = worked - total_allocated + alloc.hours
 
-        # Save cursor position for restoring after edit
+        # Save cursor context for restoring after edit
         table = self.query_one("#allocations-table", DataTable)
-        self._alloc_cursor_pos = (table.cursor_row, table.cursor_column)
+        self._alloc_cursor_ctx = (ticket_id, table.cursor_column)
 
         self.push_screen(
             EditAllocationScreen(
@@ -2348,9 +2348,29 @@ class TimesheetApp(App):
             self._on_alloc_view_edit_complete,
         )
 
+    def _restore_alloc_cursor(self, ticket_id: str | None = None) -> None:
+        """Restore cursor to the saved ticket and column after a table refresh."""
+        ctx = getattr(self, '_alloc_cursor_ctx', None)
+        if not ctx:
+            return
+        saved_ticket_id, saved_col = ctx
+        target_ticket = ticket_id or saved_ticket_id
+        table = self.query_one("#allocations-table", DataTable)
+        row_keys = list(table.rows.keys())
+        for idx, key in enumerate(row_keys):
+            if str(key.value) == target_ticket:
+                table.move_cursor(row=idx, column=saved_col)
+                return
+        # Ticket no longer in table — clamp to last row
+        if row_keys:
+            table.move_cursor(
+                row=max(0, len(row_keys) - 1), column=saved_col,
+            )
+
     def _on_alloc_view_edit_complete(self, result: tuple[str, str, str] | None) -> None:
         """Handle allocation edit from allocations view."""
         target_date = getattr(self, '_allocation_target_date', None)
+        ticket_id: str | None = None
         if result and target_date:
             ticket_id, hours_str, description = result
             hours = Decimal(hours_str)
@@ -2368,11 +2388,7 @@ class TimesheetApp(App):
                 self.notify(f"Removed allocation for {ticket_id}")
             self._refresh_display()
 
-        # Restore cursor position
-        cursor_pos = getattr(self, '_alloc_cursor_pos', None)
-        if cursor_pos:
-            table = self.query_one("#allocations-table", DataTable)
-            table.move_cursor(row=cursor_pos[0], column=cursor_pos[1])
+        self._restore_alloc_cursor(ticket_id)
 
     def _alloc_add_allocation(self) -> None:
         """Add an allocation from the allocations view via ticket selector."""
@@ -2392,7 +2408,7 @@ class TimesheetApp(App):
         d = date(self.current_year, self.current_month, day)
 
         self._allocation_target_date = d
-        self._alloc_cursor_pos = (table.cursor_row, table.cursor_column)
+        self._alloc_cursor_ctx = (None, table.cursor_column)
 
         self.push_screen(TicketSelectScreen(), self._on_alloc_ticket_selected)
 
@@ -2441,9 +2457,9 @@ class TimesheetApp(App):
             self.notify("No allocation to delete", severity="warning")
             return
 
-        # Save cursor position
+        # Save cursor context
         table = self.query_one("#allocations-table", DataTable)
-        self._alloc_cursor_pos = (table.cursor_row, table.cursor_column)
+        self._alloc_cursor_ctx = (ticket_id, table.cursor_column)
 
         self.push_screen(
             ConfirmScreen(f"Delete allocation for {ticket_id} on {d.strftime('%b %d')}?"),
@@ -2456,13 +2472,7 @@ class TimesheetApp(App):
             storage.delete_allocation(ticket_id, d)
             self.notify(f"Deleted allocation for {ticket_id} on {d.strftime('%b %d')}")
             self._refresh_display()
-
-            # Restore cursor position (clamped to valid range)
-            cursor_pos = getattr(self, '_alloc_cursor_pos', None)
-            if cursor_pos:
-                table = self.query_one("#allocations-table", DataTable)
-                row = min(cursor_pos[0], max(0, len(table.rows) - 1))
-                table.move_cursor(row=row, column=cursor_pos[1])
+            self._restore_alloc_cursor(ticket_id)
 
     def action_alloc_prev_month(self) -> None:
         """Navigate to the previous month in allocations view."""
