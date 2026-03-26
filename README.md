@@ -117,15 +117,16 @@ already has data.
 
 Worked hours can be allocated to tickets (e.g., JIRA IDs) for billing reports.
 
-| Key | Action                                              |
-| --- | --------------------------------------------------- |
-| `K` | Open ticket management screen                       |
-| `M` | Open allocations report (tickets × days)            |
-| `a` | Add allocation (day view and allocations view)      |
-| `e` | Edit allocation (day view and allocations view)     |
-| `d` | Delete allocation (day view and allocations view)   |
-| `c` | Toggle "entered on client" flag (day view)          |
-| `p` | Toggle "points entered" flag (allocations view)     |
+| Key | Action                                                     |
+| --- | ---------------------------------------------------------- |
+| `K` | Open ticket management screen                              |
+| `M` | Open allocations report (tickets × days)                   |
+| `a` | Add allocation (day view and allocations view)             |
+| `e` | Edit allocation (day view and allocations view)            |
+| `d` | Delete allocation (day view and allocations view)          |
+| `v` | Move allocation to a different day (day/allocations view)  |
+| `c` | Toggle "entered on client" flag (day view)                 |
+| `p` | Toggle "points entered" flag (allocations view)            |
 
 **Week view indicators** (Alloc column):
 

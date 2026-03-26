@@ -210,7 +210,9 @@ class TimesheetApp(App):
     }
 
     #alloc-description {
-        height: 65%;
+        height: auto;
+        min-height: 25%;
+        max-height: 65%;
         padding: 0 2;
         color: $text;
         border-top: solid $primary;
