@@ -20,6 +20,7 @@ from screens import (
     ConfirmScreen,
     EditAllocationScreen,
     EditDayScreen,
+    MoveAllocationScreen,
     TicketManagementScreen,
     TicketSelectScreen,
 )
@@ -73,6 +74,11 @@ class TimesheetDataTable(DataTable):
         elif event.key == "d" and view_mode == "allocations":
             if hasattr(self.app, '_alloc_delete_allocation'):
                 self.app._alloc_delete_allocation()  # type: ignore[attr-defined]
+            event.prevent_default()
+            event.stop()
+        elif event.key == "v" and view_mode == "allocations":
+            if hasattr(self.app, '_alloc_move_allocation'):
+                self.app._alloc_move_allocation()  # type: ignore[attr-defined]
             event.prevent_default()
             event.stop()
         # For other keys/views, don't intercept - let DataTable handle normally
@@ -242,6 +248,7 @@ class TimesheetApp(App):
         # Day view bindings (shown when in day view via check_action)
         Binding("a", "add_allocation", "Add"),
         Binding("d", "delete_allocation", "Delete"),
+        Binding("v", "move_allocation", "Move"),
         Binding("c", "toggle_entered", "Entered"),
         Binding("escape", "back_to_week", "Back"),
         # Allocations report
@@ -1531,6 +1538,9 @@ class TimesheetApp(App):
         elif action == "delete_allocation":
             # Show Delete in day view and allocations view
             return True if self.view_mode in ("day", "allocations") else None
+        elif action == "move_allocation":
+            # Show Move in day view and allocations view
+            return True if self.view_mode in ("day", "allocations") else None
         elif action == "back_to_week":
             # Only show Back in day view
             return True if self.view_mode == "day" else None
@@ -1756,6 +1766,78 @@ class TimesheetApp(App):
             storage.delete_allocation(ticket_id, self.day_view_date)
             self.notify(f"Deleted allocation for {ticket_id}")
             self._refresh_display()
+
+    def action_move_allocation(self) -> None:
+        """Move the selected allocation to a different day."""
+        if self.view_mode == "allocations":
+            self._alloc_move_allocation()
+            return
+
+        if self.view_mode != "day" or not self.day_view_date:
+            return
+
+        table = self.query_one("#day-table", DataTable)
+        if table.row_count == 0:
+            self.notify("No allocations to move", severity="warning")
+            return
+
+        row_key = table.coordinate_to_cell_key(Coordinate(table.cursor_row, 0)).row_key
+        if not row_key:
+            return
+
+        ticket_id = str(row_key.value)
+        alloc = next(
+            (a for a in self.day_allocations if a.ticket_id == ticket_id), None,
+        )
+        if not alloc:
+            return
+
+        self.push_screen(
+            MoveAllocationScreen(
+                ticket_id=ticket_id,
+                source_date=self.day_view_date,
+                hours=str(alloc.hours),
+                year=self.current_year,
+                month=self.current_month,
+            ),
+            lambda target: self._on_day_move_complete(target, alloc),
+        )
+
+    def _on_day_move_complete(
+        self, target_date: date | None, source_alloc: TicketAllocation,
+    ) -> None:
+        """Handle move allocation result from day view."""
+        if not target_date:
+            return
+
+        # Check for existing allocation on target day
+        target_allocs = storage.get_allocations_for_date(target_date)
+        existing = next(
+            (a for a in target_allocs if a.ticket_id == source_alloc.ticket_id),
+            None,
+        )
+        if existing:
+            self.notify(
+                f"{source_alloc.ticket_id} already has an allocation on "
+                f"{target_date.strftime('%b %d')}",
+                severity="error",
+            )
+            return
+
+        storage.delete_allocation(source_alloc.ticket_id, source_alloc.date)
+        moved = TicketAllocation(
+            ticket_id=source_alloc.ticket_id,
+            date=target_date,
+            hours=source_alloc.hours,
+            description=source_alloc.description,
+            entered_on_client=source_alloc.entered_on_client,
+        )
+        storage.save_allocation(moved)
+
+        src_str = source_alloc.date.strftime("%b %d")
+        dst_str = target_date.strftime("%b %d")
+        self.notify(f"Moved {source_alloc.ticket_id} from {src_str} to {dst_str}")
+        self._refresh_display()
 
     def action_toggle_entered(self):
         """Toggle the entered_on_client flag for the selected allocation."""
@@ -2473,6 +2555,78 @@ class TimesheetApp(App):
             self.notify(f"Deleted allocation for {ticket_id} on {d.strftime('%b %d')}")
             self._refresh_display()
             self._restore_alloc_cursor(ticket_id)
+
+    def _alloc_move_allocation(self) -> None:
+        """Move the allocation under the cursor to a different day."""
+        ticket_id, d = self._get_alloc_cell_info()
+        if not ticket_id or not d:
+            return
+
+        alloc = next(
+            (a for a in storage.get_allocations_for_date(d) if a.ticket_id == ticket_id),
+            None,
+        )
+        if not alloc:
+            self.notify("No allocation to move", severity="warning")
+            return
+
+        table = self.query_one("#allocations-table", DataTable)
+        self._alloc_cursor_ctx = (ticket_id, table.cursor_column)
+
+        self.push_screen(
+            MoveAllocationScreen(
+                ticket_id=ticket_id,
+                source_date=d,
+                hours=str(alloc.hours),
+                year=self.current_year,
+                month=self.current_month,
+            ),
+            lambda target: self._on_alloc_move_complete(target, alloc),
+        )
+
+    def _on_alloc_move_complete(
+        self, target_date: date | None, source_alloc: TicketAllocation,
+    ) -> None:
+        """Handle move allocation result."""
+        if not target_date:
+            return
+
+        # Check if this ticket already has an allocation on the target day
+        target_allocs = storage.get_allocations_for_date(target_date)
+        existing = next(
+            (a for a in target_allocs if a.ticket_id == source_alloc.ticket_id),
+            None,
+        )
+        if existing:
+            self.notify(
+                f"{source_alloc.ticket_id} already has an allocation on "
+                f"{target_date.strftime('%b %d')}",
+                severity="error",
+            )
+            return
+
+        # Delete from source, create on target
+        storage.delete_allocation(source_alloc.ticket_id, source_alloc.date)
+        moved = TicketAllocation(
+            ticket_id=source_alloc.ticket_id,
+            date=target_date,
+            hours=source_alloc.hours,
+            description=source_alloc.description,
+            entered_on_client=source_alloc.entered_on_client,
+        )
+        storage.save_allocation(moved)
+
+        src_str = source_alloc.date.strftime("%b %d")
+        dst_str = target_date.strftime("%b %d")
+        self.notify(f"Moved {source_alloc.ticket_id} from {src_str} to {dst_str}")
+        self._refresh_display()
+
+        # Move cursor to the target day column
+        days_to_show = getattr(self, '_alloc_days_to_show', [])
+        if target_date.day in days_to_show:
+            col = 2 + days_to_show.index(target_date.day)
+            self._alloc_cursor_ctx = (source_alloc.ticket_id, col)
+        self._restore_alloc_cursor(source_alloc.ticket_id)
 
     def action_alloc_prev_month(self) -> None:
         """Navigate to the previous month in allocations view."""

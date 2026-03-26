@@ -1017,3 +1017,134 @@ class EditAllocationScreen(ModalScreen[tuple[str, str, str] | None]):
 
         description = self.query_one("#alloc-description", TextArea).text.strip()
         self.dismiss((self.ticket.id, hours_str, description))
+
+
+class MoveAllocationScreen(ModalScreen[date | None]):
+    """Modal screen for picking a target day to move an allocation to.
+
+    Returns the target date or None if cancelled.
+    """
+
+    CSS = """
+    MoveAllocationScreen {
+        align: center middle;
+    }
+
+    #move-dialog {
+        width: 50;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    #move-title {
+        width: 100%;
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #move-info {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    #move-day {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    #move-buttons {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        align: center middle;
+    }
+
+    #move-buttons Button {
+        width: auto;
+        min-width: 12;
+        margin: 0 2;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(
+        self,
+        ticket_id: str,
+        source_date: date,
+        hours: str,
+        year: int,
+        month: int,
+    ) -> None:
+        super().__init__()
+        self.ticket_id = ticket_id
+        self.source_date = source_date
+        self.hours = hours
+        self.year = year
+        self.month = month
+
+    def compose(self) -> ComposeResult:
+        source_str = self.source_date.strftime("%a %d %b")
+        with Vertical(id="move-dialog"):
+            yield Label("Move Allocation", id="move-title")
+            yield Label(
+                f"{self.ticket_id} ({self.hours}h) on {source_str}",
+                id="move-info",
+            )
+            yield Label("Move to day (1\u201331):")
+            yield Input(
+                id="move-day",
+                placeholder="Day number",
+                type="integer",
+            )
+            with Horizontal(id="move-buttons"):
+                yield Button("Move", variant="primary", id="move-btn")
+                yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#move-day", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "move-day":
+            self._move()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "move-btn":
+            self._move()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _move(self) -> None:
+        day_str = self.query_one("#move-day", Input).value.strip()
+        if not day_str:
+            self.app.notify("Enter a day number", severity="error")
+            return
+
+        from calendar import monthrange
+
+        try:
+            day = int(day_str)
+            num_days = monthrange(self.year, self.month)[1]
+            if day < 1 or day > num_days:
+                self.app.notify(
+                    f"Day must be between 1 and {num_days}", severity="error",
+                )
+                return
+        except ValueError:
+            self.app.notify("Invalid day number", severity="error")
+            return
+
+        target = date(self.year, self.month, day)
+        if target == self.source_date:
+            self.app.notify("That's the same day", severity="warning")
+            return
+
+        self.dismiss(target)
