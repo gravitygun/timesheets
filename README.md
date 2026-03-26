@@ -73,7 +73,7 @@ python app.py --db-info
 
 ### Views
 
-The app has five views, accessible via keyboard shortcuts:
+The app has four top-level views, accessible via keyboard shortcuts:
 
 | Key | View        | Description                           |
 | --- | ----------- | ------------------------------------- |
@@ -83,28 +83,32 @@ The app has five views, accessible via keyboard shortcuts:
 | `M` | Allocations | Ticket allocations matrix for a month |
 
 Pressing `Enter` on a day in week view opens **Day view**, showing ticket
-allocations for that day.
+allocations and work descriptions for that day.
 
 ### Navigation
 
-| Key       | Action                                                   |
-| --------- | -------------------------------------------------------- |
-| `Left`    | Previous week/month/year (depending on view)             |
-| `Right`   | Next week/month/year (depending on view)                 |
-| `Up/Down` | Navigate rows                                            |
-| `Enter`   | Drill down (year → month → week → day)                   |
-| `Esc`     | Return to week view (from day view)                      |
-| `t`       | Jump to today                                            |
+| Key       | Action                                                      |
+| --------- | ----------------------------------------------------------- |
+| `Left`    | Previous week/month/year (depending on view)                |
+| `Right`   | Next week/month/year (depending on view)                    |
+| `[` / `]` | Previous/next month (allocations view)                      |
+| `Up/Down` | Navigate rows                                               |
+| `Enter`   | Drill down (year → month → week → day)                      |
+| `Esc`     | Return to week view (from day view)                         |
+| `t`       | Jump to today                                               |
 
 ### Editing
 
-| Key         | Action                                  |
-| ----------- | --------------------------------------- |
-| `e`/`Enter` | Edit selected day                       |
-| `L`         | Quick add Leave (7.5h)                  |
-| `S`         | Quick add Sick (7.5h)                   |
-| `T`         | Quick add Training (7.5h)               |
-| `h`         | Populate UK bank holidays (year view)   |
+| Key         | Action                                            |
+| ----------- | ------------------------------------------------- |
+| `e`/`Enter` | Edit selected day or allocation                   |
+| `L`         | Quick add Leave (7.5h)                            |
+| `S`         | Quick add Sick (7.5h)                             |
+| `T`         | Quick add Training (7.5h)                         |
+| `h`         | Populate UK bank holidays (year view)             |
+| `Ctrl+X`    | Cut day entry (week view)                         |
+| `Ctrl+C`    | Copy day entry (week view)                        |
+| `Ctrl+V`    | Paste day entry (week view)                       |
 
 Quick adjust shortcuts (`L`/`S`/`T`) prompt for confirmation if the day
 already has data.
@@ -113,12 +117,15 @@ already has data.
 
 Worked hours can be allocated to tickets (e.g., JIRA IDs) for billing reports.
 
-| Key | Action (context)                          |
-| --- | ----------------------------------------- |
-| `K` | Open ticket management screen             |
-| `M` | Open allocations report (tickets × days)  |
-| `a` | Add allocation (day view)                 |
-| `d` | Delete allocation (day view)              |
+| Key | Action                                              |
+| --- | --------------------------------------------------- |
+| `K` | Open ticket management screen                       |
+| `M` | Open allocations report (tickets × days)            |
+| `a` | Add allocation (day view and allocations view)      |
+| `e` | Edit allocation (day view and allocations view)     |
+| `d` | Delete allocation (day view and allocations view)   |
+| `c` | Toggle "entered on client" flag (day view)          |
+| `p` | Toggle "points entered" flag (allocations view)     |
 
 **Week view indicators** (Alloc column):
 
@@ -139,11 +146,11 @@ Worked hours can be allocated to tickets (e.g., JIRA IDs) for billing reports.
 
 ### Other
 
-| Key | Action                  |
-| --- | ----------------------- |
-| `$` | Toggle earnings display |
-| `?` | Show keyboard shortcuts |
-| `q` | Quit                    |
+| Key | Action                          |
+| --- | ------------------------------- |
+| `$` | Toggle earnings display         |
+| `?` | Show keyboard shortcuts         |
+| `q` | Quit                            |
 
 ### Adjustment Types
 
