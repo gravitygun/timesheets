@@ -11,7 +11,7 @@ from textual.coordinate import Coordinate
 from textual.widgets import Button, Checkbox, DataTable, Input, Label, TextArea
 from textual.screen import ModalScreen
 
-from models import Ticket, TimeEntry
+from models import Ticket, TicketAllocation, TimeEntry
 import storage
 
 
@@ -1148,3 +1148,220 @@ class MoveAllocationScreen(ModalScreen[date | None]):
             return
 
         self.dismiss(target)
+
+
+class ExportAllocationsScreen(ModalScreen[str | None]):
+    """Modal to configure and export allocations report to a text file."""
+
+    CSS = """
+    ExportAllocationsScreen {
+        align: center middle;
+    }
+
+    #export-dialog {
+        width: 70;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    #export-dialog Label {
+        margin-bottom: 1;
+    }
+
+    #export-month, #export-path {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    #export-buttons {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+
+    #export-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, year: int, month: int) -> None:
+        super().__init__()
+        self.initial_year = year
+        self.initial_month = month
+
+    def compose(self) -> ComposeResult:
+        from pathlib import Path
+
+        default_path = str(
+            Path.home()
+            / f"time-allocations-{self.initial_year}-{self.initial_month:02d}.txt"
+        )
+        with Vertical(id="export-dialog"):
+            yield Label("Export Allocations Report")
+            yield Label("Month (YYYY-MM):")
+            yield Input(
+                id="export-month",
+                value=f"{self.initial_year}-{self.initial_month:02d}",
+                placeholder="YYYY-MM",
+            )
+            yield Label("Output file:")
+            yield Input(
+                id="export-path",
+                value=default_path,
+            )
+            with Horizontal(id="export-buttons"):
+                yield Button("Export", variant="primary", id="export-btn")
+                yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#export-month", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Update default path when month changes."""
+        if event.input.id == "export-month":
+            from pathlib import Path
+
+            month_str = event.value.strip()
+            try:
+                parts = month_str.split("-")
+                year = int(parts[0])
+                month = int(parts[1])
+                if 1 <= month <= 12 and 1900 <= year <= 2100:
+                    path_input = self.query_one("#export-path", Input)
+                    current = path_input.value
+                    # Only update if it looks like the default pattern
+                    if "time-allocations-" in current:
+                        path_input.value = str(
+                            Path.home()
+                            / f"time-allocations-{year}-{month:02d}.txt"
+                        )
+            except (ValueError, IndexError):
+                pass
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "export-month":
+            self.query_one("#export-path", Input).focus()
+        elif event.input.id == "export-path":
+            self._export()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "export-btn":
+            self._export()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _export(self) -> None:
+        month_str = self.query_one("#export-month", Input).value.strip()
+        output_path = self.query_one("#export-path", Input).value.strip()
+
+        if not month_str or not output_path:
+            self.app.notify("Both fields are required", severity="error")
+            return
+
+        try:
+            parts = month_str.split("-")
+            year = int(parts[0])
+            month = int(parts[1])
+            if month < 1 or month > 12:
+                raise ValueError
+        except (ValueError, IndexError):
+            self.app.notify("Invalid month format (use YYYY-MM)", severity="error")
+            return
+
+        from pathlib import Path
+
+        output = Path(output_path).expanduser()
+
+        from calendar import monthrange
+        from itertools import groupby
+
+        from decimal import Decimal
+
+        adjust_type_labels = {
+            "L": "Leave", "S": "Sick", "T": "Training", "P": "Public Holiday",
+        }
+
+        def fmt_hours(h: Decimal) -> str:
+            """Format hours concisely, e.g. '3h', '1.5h'."""
+            return f"{h.normalize()}h"
+
+        allocations = storage.get_allocations_for_month(year, month)
+        entries = storage.get_month_entries(year, month)
+
+        # Index entries by date
+        entries_by_date: dict[date, TimeEntry] = {e.date: e for e in entries}
+
+        # Index allocations by date
+        allocs_by_date: dict[date, list[TicketAllocation]] = {}
+        for d, group in groupby(allocations, key=lambda a: a.date):
+            allocs_by_date[d] = list(group)
+
+        # Build ticket description lookup
+        ticket_ids = {a.ticket_id for a in allocations}
+        tickets: dict[str, str] = {}
+        for tid in ticket_ids:
+            ticket = storage.get_ticket(tid)
+            tickets[tid] = ticket.description if ticket else "Unknown"
+
+        # Iterate through all days in the month
+        num_days = monthrange(year, month)[1]
+        lines: list[str] = []
+        for day_num in range(1, num_days + 1):
+            d = date(year, month, day_num)
+            entry = entries_by_date.get(d)
+            day_allocs = allocs_by_date.get(d, [])
+
+            has_allocs = len(day_allocs) > 0
+            has_time = entry is not None and (
+                entry.clock_in is not None or entry.adjust_type is not None
+            )
+
+            if not has_allocs and not has_time:
+                continue
+
+            lines.append("-" * 49)
+            lines.append(d.strftime("%a %d %B"))
+            lines.append("")
+
+            # Show adjustment type if present (Leave, Sick, etc.)
+            if entry and entry.adjust_type:
+                label = adjust_type_labels.get(
+                    entry.adjust_type, entry.adjust_type,
+                )
+                hours = fmt_hours(entry.adjusted_hours)
+                lines.append(f"{label} ({hours})")
+                lines.append("")
+
+            for alloc in day_allocs:
+                hours = fmt_hours(alloc.hours)
+                lines.append(
+                    f"{alloc.ticket_id}: {tickets[alloc.ticket_id]} ({hours})",
+                )
+                lines.append("")
+                if alloc.description:
+                    lines.append(alloc.description)
+                lines.append("")
+
+        if not lines:
+            self.app.notify(
+                f"Nothing to export for {year}-{month:02d}", severity="warning",
+            )
+            return
+
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("\n".join(lines), encoding="utf-8")
+        except OSError as exc:
+            self.app.notify(f"Failed to write file: {exc}", severity="error")
+            return
+
+        self.dismiss(str(output))

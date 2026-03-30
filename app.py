@@ -20,6 +20,7 @@ from screens import (
     ConfirmScreen,
     EditAllocationScreen,
     EditDayScreen,
+    ExportAllocationsScreen,
     MoveAllocationScreen,
     TicketManagementScreen,
     TicketSelectScreen,
@@ -258,6 +259,7 @@ class TimesheetApp(App):
         Binding("p", "toggle_points_entered", "Pts Entered"),
         Binding("left_square_bracket", "alloc_prev_month", "[◄ Month", show=False),
         Binding("right_square_bracket", "alloc_next_month", "Month ►]", show=False),
+        Binding("R", "export_allocations", "Report"),
     ]
 
     def __init__(self):
@@ -2651,6 +2653,17 @@ class TimesheetApp(App):
         self.weeks = get_weeks_in_month(self.current_year, self.current_month)
         self._load_month_data()
         self._refresh_display()
+
+    def action_export_allocations(self) -> None:
+        """Open the export allocations report dialog."""
+        def handle_result(result: str | None) -> None:
+            if result:
+                self.notify(f"Report saved to {result}")
+
+        self.push_screen(
+            ExportAllocationsScreen(self.current_year, self.current_month),
+            handle_result,
+        )
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         """Handle cell selection events (no-op for allocations; handled by key/double-click)."""
