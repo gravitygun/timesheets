@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from dataclasses import dataclass
 from datetime import date, time, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 
-from models import Config, Ticket, TicketAllocation, TimeEntry
+from models import (
+    Config,
+    Deliverable,
+    MonthlyBilling,
+    Ticket,
+    TicketAllocation,
+    TimeEntry,
+    WorkPackage,
+)
 
 
 def _get_db_path() -> Path:
@@ -63,9 +72,37 @@ def init_db():
             UNIQUE(ticket_id, date)
         );
 
+        CREATE TABLE IF NOT EXISTS work_packages (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS deliverables (
+            id TEXT PRIMARY KEY,
+            work_package_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            active INTEGER DEFAULT 1,
+            FOREIGN KEY (work_package_id) REFERENCES work_packages(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS monthly_point_budgets (
+            year INTEGER NOT NULL,
+            month INTEGER NOT NULL,
+            max_points INTEGER NOT NULL,
+            PRIMARY KEY (year, month)
+        );
+
+        CREATE TABLE IF NOT EXISTS monthly_billing (
+            year INTEGER NOT NULL,
+            month INTEGER NOT NULL,
+            finalised INTEGER DEFAULT 0,
+            PRIMARY KEY (year, month)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_entries_date ON time_entries(date);
         CREATE INDEX IF NOT EXISTS idx_allocations_date ON ticket_allocations(date);
         CREATE INDEX IF NOT EXISTS idx_allocations_ticket ON ticket_allocations(ticket_id);
+        CREATE INDEX IF NOT EXISTS idx_deliverables_wp ON deliverables(work_package_id);
     """)
 
     # Migration: Add entered_on_client column if it doesn't exist
@@ -90,6 +127,12 @@ def init_db():
             "ALTER TABLE tickets ADD COLUMN points_entered INTEGER DEFAULT 0"
         )
 
+    # Migration: Add deliverable_id column to tickets if it doesn't exist
+    if "deliverable_id" not in ticket_columns:
+        conn.execute(
+            "ALTER TABLE tickets ADD COLUMN deliverable_id TEXT"
+        )
+
     # Seed points_start_date config if not yet set
     row = conn.execute(
         "SELECT value FROM config WHERE key = 'points_start_date'"
@@ -100,8 +143,164 @@ def init_db():
             ("points_start_date", "2026-03-01"),
         )
 
+    # Seed contract config if not yet set
+    for key, value in [
+        ("contract_start", "2026-04-01"),
+        ("contract_end", "2027-03-31"),
+        ("annual_max_points", "825"),
+    ]:
+        existing = conn.execute(
+            "SELECT value FROM config WHERE key = ?", (key,)
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                "INSERT INTO config (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+
+    # Update point_rate to 200 if still at old default of 210
+    rate_row = conn.execute(
+        "SELECT value FROM config WHERE key = 'point_rate'"
+    ).fetchone()
+    if rate_row and rate_row["value"] == "210":
+        conn.execute(
+            "UPDATE config SET value = '200' WHERE key = 'point_rate'"
+        )
+
+    # Seed work packages and deliverables if empty
+    wp_count = conn.execute("SELECT COUNT(*) as c FROM work_packages").fetchone()
+    if wp_count["c"] == 0:
+        _seed_work_packages_and_deliverables(conn)
+    else:
+        # Migration: add missing WPs and inactive deliverables to existing DBs
+        _backfill_inactive_deliverables(conn)
+
+    # Seed monthly point budgets if empty
+    budget_count = conn.execute(
+        "SELECT COUNT(*) as c FROM monthly_point_budgets"
+    ).fetchone()
+    if budget_count["c"] == 0:
+        _seed_monthly_point_budgets(conn)
+
     conn.commit()
     conn.close()
+
+
+def _seed_work_packages_and_deliverables(conn: sqlite3.Connection) -> None:
+    """Seed initial work packages and deliverables."""
+    work_packages = [
+        ("WP2", "Design and Build Service"),
+        ("WP2a", "Solution Development Service"),
+        ("WP2b", "Design Service"),
+        ("WP2c", "Build Service"),
+        ("WP2d", "Assurance Service"),
+        ("WP4", "Service Improvement"),
+        ("WP5", "Support and Sustain Service"),
+        ("WP5a", "Transform Service"),
+    ]
+    for wp_id, title in work_packages:
+        conn.execute(
+            "INSERT INTO work_packages (id, title) VALUES (?, ?)",
+            (wp_id, title),
+        )
+
+    # (id, work_package_id, title, active)
+    deliverables = [
+        # WP2 – Design and Build Service (inactive)
+        ("WP2-D1", "WP2", "Solution Options paper", 0),
+        ("WP2-D2", "WP2", "Updated Architecture Decision Log", 0),
+        ("WP2-D3", "WP2", "Platform Specification produced for required system", 0),
+        ("WP2-D4", "WP2", "Update Workbook", 0),
+        # WP2a – Solution Development Service (active)
+        ("WP2a-D1", "WP2a", "Solution Options paper", 1),
+        ("WP2a-D2", "WP2a", "Update Workbook task", 1),
+        # WP2b – Design Service (active)
+        ("WP2b-D1", "WP2b", "Design Architecture Pack", 1),
+        ("WP2b-D2", "WP2b", "Platform Specification", 1),
+        ("WP2b-D3", "WP2b", "Update Workbook task", 1),
+        # WP2c – Build Service (inactive)
+        ("WP2c-D1", "WP2c", "Build scripts and Automation playbook developed/enhanced", 0),
+        ("WP2c-D2", "WP2c", "Build Sheets and build test report", 0),
+        ("WP2c-D3", "WP2c", "Deployed Analytics platforms and Query Systems", 0),
+        ("WP2c-D4", "WP2c", "Update Workbook task", 0),
+        # WP2d – Assurance Service (active)
+        ("WP2d-D1", "WP2d", "Document methodology, tooling, and approach", 1),
+        ("WP2d-D2", "WP2d", "Coding Standards Review", 1),
+        ("WP2d-D3", "WP2d", "Code Review Reports", 1),
+        # WP4 – Service Improvement (inactive)
+        ("WP4-D1", "WP4", "Efficiency Log", 0),
+        # WP5 – Support and Sustain Service (active)
+        ("WP5-D1", "WP5", "Monthly Governance Report", 1),
+        ("WP5-D2", "WP5", "Quarterly Summary Report", 1),
+        ("WP5-D3", "WP5", "Annual Summary Report", 1),
+        ("WP5-D4", "WP5", "Incident Management Outputs", 1),
+        # WP5a – Transform Service (active)
+        ("WP5a-D1", "WP5a", "Deployed Code Changes", 1),
+        ("WP5a-D2", "WP5a", "Change Management Process Completed", 1),
+        ("WP5a-D3", "WP5a", "Technical Documentation Updated", 1),
+    ]
+    for del_id, wp_id, title, active in deliverables:
+        conn.execute(
+            "INSERT INTO deliverables (id, work_package_id, title, active) "
+            "VALUES (?, ?, ?, ?)",
+            (del_id, wp_id, title, active),
+        )
+
+
+def _backfill_inactive_deliverables(conn: sqlite3.Connection) -> None:
+    """Add missing work packages and inactive deliverables to existing databases."""
+    missing_wps = [
+        ("WP2", "Design and Build Service"),
+        ("WP2c", "Build Service"),
+        ("WP4", "Service Improvement"),
+    ]
+    for wp_id, title in missing_wps:
+        existing = conn.execute(
+            "SELECT id FROM work_packages WHERE id = ?", (wp_id,)
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                "INSERT INTO work_packages (id, title) VALUES (?, ?)",
+                (wp_id, title),
+            )
+
+    missing_dels = [
+        ("WP2-D1", "WP2", "Solution Options paper", 0),
+        ("WP2-D2", "WP2", "Updated Architecture Decision Log", 0),
+        ("WP2-D3", "WP2", "Platform Specification produced for required system", 0),
+        ("WP2-D4", "WP2", "Update Workbook", 0),
+        ("WP2c-D1", "WP2c", "Build scripts and Automation playbook developed/enhanced", 0),
+        ("WP2c-D2", "WP2c", "Build Sheets and build test report", 0),
+        ("WP2c-D3", "WP2c", "Deployed Analytics platforms and Query Systems", 0),
+        ("WP2c-D4", "WP2c", "Update Workbook task", 0),
+        ("WP4-D1", "WP4", "Efficiency Log", 0),
+    ]
+    for del_id, wp_id, title, active in missing_dels:
+        existing = conn.execute(
+            "SELECT id FROM deliverables WHERE id = ?", (del_id,)
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                "INSERT INTO deliverables (id, work_package_id, title, active) "
+                "VALUES (?, ?, ?, ?)",
+                (del_id, wp_id, title, active),
+            )
+
+
+def _seed_monthly_point_budgets(conn: sqlite3.Connection) -> None:
+    """Seed monthly point budgets from the contract fee schedule."""
+    budgets = [
+        (2026, 4, 68), (2026, 5, 68), (2026, 6, 68),
+        (2026, 7, 69), (2026, 8, 69), (2026, 9, 69),
+        (2026, 10, 69), (2026, 11, 69), (2026, 12, 69),
+        (2027, 1, 69), (2027, 2, 69), (2027, 3, 69),
+    ]
+    for year, month, points in budgets:
+        conn.execute(
+            "INSERT INTO monthly_point_budgets (year, month, max_points) "
+            "VALUES (?, ?, ?)",
+            (year, month, points),
+        )
 
 
 def _parse_time(val: str | None) -> time | None:
@@ -215,6 +414,16 @@ def get_config() -> Config:
             config.points_start_date = (
                 date.fromisoformat(row["value"]) if row["value"] else None
             )
+        elif row["key"] == "contract_start":
+            config.contract_start = (
+                date.fromisoformat(row["value"]) if row["value"] else None
+            )
+        elif row["key"] == "contract_end":
+            config.contract_end = (
+                date.fromisoformat(row["value"]) if row["value"] else None
+            )
+        elif row["key"] == "annual_max_points":
+            config.annual_max_points = int(row["value"]) if row["value"] else 825
 
     return config
 
@@ -237,6 +446,14 @@ def save_config(config: Config):
     conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
                  ("points_start_date",
                   config.points_start_date.isoformat() if config.points_start_date else ""))
+    conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                 ("contract_start",
+                  config.contract_start.isoformat() if config.contract_start else ""))
+    conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                 ("contract_end",
+                  config.contract_end.isoformat() if config.contract_end else ""))
+    conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                 ("annual_max_points", str(config.annual_max_points)))
     conn.commit()
     conn.close()
 
@@ -313,6 +530,7 @@ def _row_to_ticket(row: sqlite3.Row) -> Ticket:
         archived=bool(row["archived"]),
         created_at=date.fromisoformat(row["created_at"]) if row["created_at"] else None,
         points_entered=bool(row["points_entered"]) if "points_entered" in keys else False,
+        deliverable_id=row["deliverable_id"] if "deliverable_id" in keys else None,
     )
 
 
@@ -323,8 +541,8 @@ def save_ticket(ticket: Ticket) -> None:
     conn.execute(
         """
         INSERT OR REPLACE INTO tickets
-            (id, description, archived, created_at, points_entered)
-        VALUES (?, ?, ?, ?, ?)
+            (id, description, archived, created_at, points_entered, deliverable_id)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
             ticket.id,
@@ -332,6 +550,7 @@ def save_ticket(ticket: Ticket) -> None:
             int(ticket.archived),
             created_at.isoformat(),
             int(ticket.points_entered),
+            ticket.deliverable_id,
         ),
     )
     conn.commit()
@@ -564,3 +783,309 @@ def get_total_allocated_hours(d: date) -> Decimal:
     ).fetchone()
     conn.close()
     return Decimal(str(row["total"])).quantize(Decimal("0.01"))
+
+
+# --- Work Package Functions ---
+
+
+def _row_to_work_package(row: sqlite3.Row) -> WorkPackage:
+    """Convert a database row to a WorkPackage object."""
+    return WorkPackage(id=row["id"], title=row["title"])
+
+
+def get_all_work_packages() -> list[WorkPackage]:
+    """Get all work packages."""
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM work_packages ORDER BY id").fetchall()
+    conn.close()
+    return [_row_to_work_package(row) for row in rows]
+
+
+def get_work_package(wp_id: str) -> WorkPackage | None:
+    """Get a single work package by ID."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM work_packages WHERE id = ?", (wp_id,)
+    ).fetchone()
+    conn.close()
+    return _row_to_work_package(row) if row else None
+
+
+def save_work_package(wp: WorkPackage) -> None:
+    """Insert or update a work package."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT OR REPLACE INTO work_packages (id, title) VALUES (?, ?)",
+        (wp.id, wp.title),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_work_package(wp_id: str) -> bool:
+    """Delete a work package. Returns False if it has deliverables."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT COUNT(*) as c FROM deliverables WHERE work_package_id = ?",
+        (wp_id,),
+    ).fetchone()
+    if row["c"] > 0:
+        conn.close()
+        return False
+    conn.execute("DELETE FROM work_packages WHERE id = ?", (wp_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+# --- Deliverable Functions ---
+
+
+def _row_to_deliverable(row: sqlite3.Row) -> Deliverable:
+    """Convert a database row to a Deliverable object."""
+    return Deliverable(
+        id=row["id"],
+        work_package_id=row["work_package_id"],
+        title=row["title"],
+        active=bool(row["active"]),
+    )
+
+
+def get_all_deliverables(active_only: bool = True) -> list[Deliverable]:
+    """Get all deliverables, optionally filtered to active only."""
+    conn = get_connection()
+    if active_only:
+        rows = conn.execute(
+            "SELECT * FROM deliverables WHERE active = 1 ORDER BY id"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM deliverables ORDER BY id"
+        ).fetchall()
+    conn.close()
+    return [_row_to_deliverable(row) for row in rows]
+
+
+def get_deliverables_for_work_package(
+    wp_id: str, active_only: bool = True,
+) -> list[Deliverable]:
+    """Get all deliverables for a work package."""
+    conn = get_connection()
+    if active_only:
+        rows = conn.execute(
+            "SELECT * FROM deliverables WHERE work_package_id = ? AND active = 1 "
+            "ORDER BY id",
+            (wp_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM deliverables WHERE work_package_id = ? ORDER BY id",
+            (wp_id,),
+        ).fetchall()
+    conn.close()
+    return [_row_to_deliverable(row) for row in rows]
+
+
+def get_deliverable(del_id: str) -> Deliverable | None:
+    """Get a single deliverable by ID."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM deliverables WHERE id = ?", (del_id,)
+    ).fetchone()
+    conn.close()
+    return _row_to_deliverable(row) if row else None
+
+
+def save_deliverable(d: Deliverable) -> None:
+    """Insert or update a deliverable."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT OR REPLACE INTO deliverables "
+        "(id, work_package_id, title, active) VALUES (?, ?, ?, ?)",
+        (d.id, d.work_package_id, d.title, int(d.active)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_deliverable(del_id: str) -> bool:
+    """Delete a deliverable. Returns False if tickets reference it."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT COUNT(*) as c FROM tickets WHERE deliverable_id = ?",
+        (del_id,),
+    ).fetchone()
+    if row["c"] > 0:
+        conn.close()
+        return False
+    conn.execute("DELETE FROM deliverables WHERE id = ?", (del_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def set_ticket_deliverable(ticket_id: str, deliverable_id: str | None) -> None:
+    """Set the deliverable for a ticket."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE tickets SET deliverable_id = ? WHERE id = ?",
+        (deliverable_id, ticket_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+# --- Monthly Point Budget Functions ---
+
+
+def get_monthly_point_budget(year: int, month: int) -> int | None:
+    """Get the point budget for a specific month."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT max_points FROM monthly_point_budgets "
+        "WHERE year = ? AND month = ?",
+        (year, month),
+    ).fetchone()
+    conn.close()
+    return row["max_points"] if row else None
+
+
+def save_monthly_point_budget(year: int, month: int, max_points: int) -> None:
+    """Insert or update a monthly point budget."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT OR REPLACE INTO monthly_point_budgets "
+        "(year, month, max_points) VALUES (?, ?, ?)",
+        (year, month, max_points),
+    )
+    conn.commit()
+    conn.close()
+
+
+# --- Monthly Billing Functions ---
+
+
+def get_monthly_billing(year: int, month: int) -> MonthlyBilling:
+    """Get billing record for a month (creates default if not exists)."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM monthly_billing WHERE year = ? AND month = ?",
+        (year, month),
+    ).fetchone()
+    conn.close()
+    if row:
+        return MonthlyBilling(
+            year=row["year"],
+            month=row["month"],
+            finalised=bool(row["finalised"]),
+        )
+    return MonthlyBilling(year=year, month=month, finalised=False)
+
+
+def save_monthly_billing(billing: MonthlyBilling) -> None:
+    """Insert or update a monthly billing record."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT OR REPLACE INTO monthly_billing "
+        "(year, month, finalised) VALUES (?, ?, ?)",
+        (billing.year, billing.month, int(billing.finalised)),
+    )
+    conn.commit()
+    conn.close()
+
+
+@dataclass
+class DeliverableBillingLine:
+    """A single line in the billing breakdown."""
+
+    deliverable_id: str | None
+    deliverable_title: str
+    work_package_id: str
+    work_package_title: str
+    hours: Decimal
+    points: Decimal
+    amount_ex_vat: Decimal
+    amount_inc_vat: Decimal
+
+
+def get_billing_summary_for_month(
+    year: int,
+    month: int,
+    hours_per_point: Decimal,
+    point_rate: Decimal,
+    vat_rate: Decimal,
+) -> list[DeliverableBillingLine]:
+    """Get billing breakdown by deliverable for a month.
+
+    Returns a list of DeliverableBillingLine, one per deliverable
+    (plus one for unlinked allocations if any).
+    """
+    from calendar import monthrange
+
+    start = date(year, month, 1)
+    end = date(year, month, monthrange(year, month)[1])
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            t.deliverable_id,
+            d.title as deliverable_title,
+            d.work_package_id,
+            wp.title as work_package_title,
+            SUM(CAST(ta.hours AS REAL)) as total_hours
+        FROM ticket_allocations ta
+        JOIN tickets t ON ta.ticket_id = t.id
+        LEFT JOIN deliverables d ON t.deliverable_id = d.id
+        LEFT JOIN work_packages wp ON d.work_package_id = wp.id
+        WHERE ta.date >= ? AND ta.date <= ?
+            AND t.archived = 1
+        GROUP BY t.deliverable_id
+        ORDER BY d.work_package_id, t.deliverable_id
+        """,
+        (start.isoformat(), end.isoformat()),
+    ).fetchall()
+    conn.close()
+
+    lines: list[DeliverableBillingLine] = []
+    for row in rows:
+        hours = Decimal(str(row["total_hours"])).quantize(Decimal("0.01"))
+        points = (hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING)
+        amount_ex = (points * point_rate).quantize(Decimal("0.01"))
+        amount_inc = (amount_ex * (1 + vat_rate)).quantize(Decimal("0.01"))
+        lines.append(DeliverableBillingLine(
+            deliverable_id=row["deliverable_id"],
+            deliverable_title=row["deliverable_title"] or "Unlinked",
+            work_package_id=row["work_package_id"] or "",
+            work_package_title=row["work_package_title"] or "",
+            hours=hours,
+            points=points,
+            amount_ex_vat=amount_ex,
+            amount_inc_vat=amount_inc,
+        ))
+    return lines
+
+
+def get_year_to_date_points(
+    contract_start: date,
+    up_to_year: int,
+    up_to_month: int,
+    hours_per_point: Decimal,
+) -> Decimal:
+    """Get total points used from contract start up to end of a given month."""
+    from calendar import monthrange
+
+    end = date(up_to_year, up_to_month, monthrange(up_to_year, up_to_month)[1])
+    conn = get_connection()
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(CAST(ta.hours AS REAL)), 0) as total
+        FROM ticket_allocations ta
+        JOIN tickets t ON ta.ticket_id = t.id
+        WHERE ta.date >= ? AND ta.date <= ?
+            AND t.archived = 1
+        """,
+        (contract_start.isoformat(), end.isoformat()),
+    ).fetchone()
+    conn.close()
+    total_hours = Decimal(str(row["total"])).quantize(Decimal("0.01"))
+    return (total_hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING)

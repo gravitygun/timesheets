@@ -49,8 +49,11 @@ class Config:
     standard_day_hours: Decimal = Decimal("7.5")
     vat_rate: Decimal = Decimal("0.20")
     hours_per_point: Decimal = Decimal("2")
-    point_rate: Decimal = Decimal("210")
+    point_rate: Decimal = Decimal("200")
     points_start_date: date | None = None
+    contract_start: date | None = None
+    contract_end: date | None = None
+    annual_max_points: int = 825
 
 
 @dataclass
@@ -62,6 +65,7 @@ class Ticket:
     archived: bool = False
     created_at: date | None = None
     points_entered: bool = False
+    deliverable_id: str | None = None
 
 
 @dataclass
@@ -73,3 +77,30 @@ class TicketAllocation:
     hours: Decimal
     description: str | None = None
     entered_on_client: bool = False
+
+
+@dataclass
+class WorkPackage:
+    """A work package grouping related deliverables."""
+
+    id: str
+    title: str
+
+
+@dataclass
+class Deliverable:
+    """A billable deliverable within a work package."""
+
+    id: str
+    work_package_id: str
+    title: str
+    active: bool = True
+
+
+@dataclass
+class MonthlyBilling:
+    """Tracks billing finalisation state for a month."""
+
+    year: int
+    month: int
+    finalised: bool = False

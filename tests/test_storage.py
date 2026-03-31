@@ -5,7 +5,15 @@ from decimal import Decimal
 
 import pytest
 
-from models import TimeEntry, Config, Ticket, TicketAllocation
+from models import (
+    Config,
+    Deliverable,
+    MonthlyBilling,
+    Ticket,
+    TicketAllocation,
+    TimeEntry,
+    WorkPackage,
+)
 
 
 # We need to set TIMESHEET_DB before importing storage
@@ -602,4 +610,319 @@ class TestConfigPointsStorage:
 
         retrieved = storage.get_config()
         assert retrieved.hours_per_point == Decimal("2")
-        assert retrieved.point_rate == Decimal("210")
+        assert retrieved.point_rate == Decimal("200")
+
+
+class TestWorkPackages:
+    """Tests for work package CRUD operations."""
+
+    def test_seed_data(self, temp_database):
+        """Test that work packages are seeded on init."""
+        storage = temp_database
+        wps = storage.get_all_work_packages()
+        assert len(wps) == 8
+        wp_ids = {wp.id for wp in wps}
+        assert wp_ids == {"WP2", "WP2a", "WP2b", "WP2c", "WP2d", "WP4", "WP5", "WP5a"}
+
+    def test_get_work_package(self, temp_database):
+        """Test getting a single work package."""
+        storage = temp_database
+        wp = storage.get_work_package("WP2a")
+        assert wp is not None
+        assert wp.title == "Solution Development Service"
+
+    def test_get_nonexistent_work_package(self, temp_database):
+        """Test getting a nonexistent work package returns None."""
+        storage = temp_database
+        assert storage.get_work_package("WP99") is None
+
+    def test_save_work_package(self, temp_database):
+        """Test saving a new work package."""
+        storage = temp_database
+        wp = WorkPackage(id="WP99", title="Test Package")
+        storage.save_work_package(wp)
+        retrieved = storage.get_work_package("WP99")
+        assert retrieved is not None
+        assert retrieved.title == "Test Package"
+
+    def test_update_work_package(self, temp_database):
+        """Test updating an existing work package."""
+        storage = temp_database
+        wp = storage.get_work_package("WP2a")
+        assert wp is not None
+        wp.title = "Updated Title"
+        storage.save_work_package(wp)
+        retrieved = storage.get_work_package("WP2a")
+        assert retrieved is not None
+        assert retrieved.title == "Updated Title"
+
+    def test_delete_work_package_with_deliverables(self, temp_database):
+        """Test that a work package with deliverables cannot be deleted."""
+        storage = temp_database
+        assert storage.delete_work_package("WP2a") is False
+
+    def test_delete_empty_work_package(self, temp_database):
+        """Test deleting a work package with no deliverables."""
+        storage = temp_database
+        wp = WorkPackage(id="WP99", title="Empty Package")
+        storage.save_work_package(wp)
+        assert storage.delete_work_package("WP99") is True
+        assert storage.get_work_package("WP99") is None
+
+
+class TestDeliverables:
+    """Tests for deliverable CRUD operations."""
+
+    def test_seed_data(self, temp_database):
+        """Test that deliverables are seeded on init."""
+        storage = temp_database
+        deliverables = storage.get_all_deliverables(active_only=False)
+        assert len(deliverables) == 24
+
+    def test_get_deliverables_for_work_package(self, temp_database):
+        """Test getting deliverables for a specific work package."""
+        storage = temp_database
+        dels = storage.get_deliverables_for_work_package("WP2a")
+        assert len(dels) == 2
+        del_ids = {d.id for d in dels}
+        assert del_ids == {"WP2a-D1", "WP2a-D2"}
+
+    def test_get_deliverable(self, temp_database):
+        """Test getting a single deliverable."""
+        storage = temp_database
+        d = storage.get_deliverable("WP2a-D1")
+        assert d is not None
+        assert d.title == "Solution Options paper"
+        assert d.work_package_id == "WP2a"
+        assert d.active is True
+
+    def test_save_deliverable(self, temp_database):
+        """Test saving a new deliverable."""
+        storage = temp_database
+        d = Deliverable(
+            id="WP2a-D9", work_package_id="WP2a",
+            title="Test Deliverable",
+        )
+        storage.save_deliverable(d)
+        retrieved = storage.get_deliverable("WP2a-D9")
+        assert retrieved is not None
+        assert retrieved.title == "Test Deliverable"
+
+    def test_active_only_filter(self, temp_database):
+        """Test that active_only filter works."""
+        storage = temp_database
+        d = storage.get_deliverable("WP2a-D1")
+        assert d is not None
+        d.active = False
+        storage.save_deliverable(d)
+
+        active = storage.get_all_deliverables(active_only=True)
+        all_dels = storage.get_all_deliverables(active_only=False)
+        # 9 inactive by default + 1 we just deactivated = 10
+        assert len(all_dels) - len(active) == 10
+
+    def test_delete_deliverable_with_tickets(self, temp_database):
+        """Test that a deliverable with linked tickets cannot be deleted."""
+        storage = temp_database
+        ticket = Ticket(id="TEST1", description="Test", deliverable_id="WP2a-D1")
+        storage.save_ticket(ticket)
+        assert storage.delete_deliverable("WP2a-D1") is False
+
+    def test_delete_unlinked_deliverable(self, temp_database):
+        """Test deleting a deliverable with no linked tickets."""
+        storage = temp_database
+        d = Deliverable(
+            id="WP99-D1", work_package_id="WP2a", title="Temp",
+        )
+        storage.save_deliverable(d)
+        assert storage.delete_deliverable("WP99-D1") is True
+        assert storage.get_deliverable("WP99-D1") is None
+
+
+class TestTicketDeliverable:
+    """Tests for ticket-deliverable linking."""
+
+    def test_ticket_deliverable_id(self, temp_database):
+        """Test saving and retrieving deliverable_id on tickets."""
+        storage = temp_database
+        ticket = Ticket(
+            id="TEST1", description="Test",
+            deliverable_id="WP2a-D1",
+        )
+        storage.save_ticket(ticket)
+        retrieved = storage.get_ticket("TEST1")
+        assert retrieved is not None
+        assert retrieved.deliverable_id == "WP2a-D1"
+
+    def test_set_ticket_deliverable(self, temp_database):
+        """Test setting deliverable on an existing ticket."""
+        storage = temp_database
+        ticket = Ticket(id="TEST1", description="Test")
+        storage.save_ticket(ticket)
+
+        storage.set_ticket_deliverable("TEST1", "WP2a-D1")
+        retrieved = storage.get_ticket("TEST1")
+        assert retrieved is not None
+        assert retrieved.deliverable_id == "WP2a-D1"
+
+    def test_clear_ticket_deliverable(self, temp_database):
+        """Test clearing deliverable from a ticket."""
+        storage = temp_database
+        ticket = Ticket(
+            id="TEST1", description="Test",
+            deliverable_id="WP2a-D1",
+        )
+        storage.save_ticket(ticket)
+
+        storage.set_ticket_deliverable("TEST1", None)
+        retrieved = storage.get_ticket("TEST1")
+        assert retrieved is not None
+        assert retrieved.deliverable_id is None
+
+
+class TestMonthlyPointBudgets:
+    """Tests for monthly point budget operations."""
+
+    def test_seed_data(self, temp_database):
+        """Test that monthly budgets are seeded on init."""
+        storage = temp_database
+        assert storage.get_monthly_point_budget(2026, 4) == 68
+        assert storage.get_monthly_point_budget(2026, 7) == 69
+        assert storage.get_monthly_point_budget(2027, 3) == 69
+
+    def test_get_nonexistent_budget(self, temp_database):
+        """Test getting a nonexistent budget returns None."""
+        storage = temp_database
+        assert storage.get_monthly_point_budget(2025, 1) is None
+
+    def test_save_budget(self, temp_database):
+        """Test saving a monthly point budget."""
+        storage = temp_database
+        storage.save_monthly_point_budget(2025, 6, 70)
+        assert storage.get_monthly_point_budget(2025, 6) == 70
+
+
+class TestMonthlyBilling:
+    """Tests for monthly billing operations."""
+
+    def test_default_billing(self, temp_database):
+        """Test that default billing is unfinalised."""
+        storage = temp_database
+        billing = storage.get_monthly_billing(2026, 4)
+        assert billing.finalised is False
+
+    def test_finalise_billing(self, temp_database):
+        """Test finalising a month's billing."""
+        storage = temp_database
+        billing = MonthlyBilling(year=2026, month=4, finalised=True)
+        storage.save_monthly_billing(billing)
+        retrieved = storage.get_monthly_billing(2026, 4)
+        assert retrieved.finalised is True
+
+
+class TestBillingSummary:
+    """Tests for billing summary query."""
+
+    def test_billing_summary_by_deliverable(self, temp_database):
+        """Test billing summary groups by deliverable (closed tickets only)."""
+        storage = temp_database
+        # Create closed tickets linked to deliverables
+        t1 = Ticket(id="T1", description="Task 1", deliverable_id="WP2a-D1", archived=True)
+        t2 = Ticket(id="T2", description="Task 2", deliverable_id="WP2a-D2", archived=True)
+        storage.save_ticket(t1)
+        storage.save_ticket(t2)
+
+        # Create allocations
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T1", date=date(2026, 4, 1), hours=Decimal("4"),
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T2", date=date(2026, 4, 1), hours=Decimal("2"),
+        ))
+
+        lines = storage.get_billing_summary_for_month(
+            2026, 4,
+            hours_per_point=Decimal("2"),
+            point_rate=Decimal("200"),
+            vat_rate=Decimal("0.20"),
+        )
+        assert len(lines) == 2
+
+        d1_line = next(l for l in lines if l.deliverable_id == "WP2a-D1")
+        assert d1_line.hours == Decimal("4.00")
+        assert d1_line.points == Decimal("2.0")
+        assert d1_line.amount_ex_vat == Decimal("400.00")
+        assert d1_line.amount_inc_vat == Decimal("480.00")
+
+    def test_billing_summary_excludes_open_tickets(self, temp_database):
+        """Test billing summary excludes open (non-closed) tickets."""
+        storage = temp_database
+        t1 = Ticket(id="T1", description="Open task", deliverable_id="WP2a-D1")
+        storage.save_ticket(t1)
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T1", date=date(2026, 4, 1), hours=Decimal("4"),
+        ))
+
+        lines = storage.get_billing_summary_for_month(
+            2026, 4,
+            hours_per_point=Decimal("2"),
+            point_rate=Decimal("200"),
+            vat_rate=Decimal("0.20"),
+        )
+        assert lines == []
+
+    def test_billing_summary_unlinked(self, temp_database):
+        """Test billing summary includes unlinked closed tickets."""
+        storage = temp_database
+        t1 = Ticket(id="T1", description="Unlinked task", archived=True)
+        storage.save_ticket(t1)
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T1", date=date(2026, 4, 1), hours=Decimal("3"),
+        ))
+
+        lines = storage.get_billing_summary_for_month(
+            2026, 4,
+            hours_per_point=Decimal("2"),
+            point_rate=Decimal("200"),
+            vat_rate=Decimal("0.20"),
+        )
+        assert len(lines) == 1
+        assert lines[0].deliverable_id is None
+        assert lines[0].deliverable_title == "Unlinked"
+
+    def test_empty_month(self, temp_database):
+        """Test billing summary for month with no allocations."""
+        storage = temp_database
+        lines = storage.get_billing_summary_for_month(
+            2026, 4,
+            hours_per_point=Decimal("2"),
+            point_rate=Decimal("200"),
+            vat_rate=Decimal("0.20"),
+        )
+        assert lines == []
+
+
+class TestContractConfig:
+    """Tests for contract configuration fields."""
+
+    def test_contract_config_seeded(self, temp_database):
+        """Test that contract config is seeded on init."""
+        storage = temp_database
+        config = storage.get_config()
+        assert config.contract_start == date(2026, 4, 1)
+        assert config.contract_end == date(2027, 3, 31)
+        assert config.annual_max_points == 825
+
+    def test_contract_config_round_trip(self, temp_database):
+        """Test saving and loading contract config."""
+        storage = temp_database
+        config = storage.get_config()
+        config.contract_start = date(2026, 5, 1)
+        config.contract_end = date(2027, 4, 30)
+        config.annual_max_points = 900
+        storage.save_config(config)
+
+        retrieved = storage.get_config()
+        assert retrieved.contract_start == date(2026, 5, 1)
+        assert retrieved.contract_end == date(2027, 4, 30)
+        assert retrieved.annual_max_points == 900

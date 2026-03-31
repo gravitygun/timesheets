@@ -18,6 +18,7 @@ from models import Ticket, TicketAllocation, TimeEntry
 from utils import calculate_points, get_weeks_in_month
 from screens import (
     ConfirmScreen,
+    DeliverableManagementScreen,
     EditAllocationScreen,
     EditDayScreen,
     ExportAllocationsScreen,
@@ -219,6 +220,25 @@ class TimesheetApp(App):
         border-top: solid $primary;
     }
 
+    #billing-header {
+        height: auto;
+        background: $primary;
+        color: $text;
+        padding: 0 1;
+        text-style: bold;
+    }
+
+    #billing-table {
+        height: 1fr;
+        margin: 1 2;
+    }
+
+    #billing-summary {
+        height: auto;
+        padding: 1 2;
+        color: $text;
+    }
+
     DataTable {
         height: 100%;
     }
@@ -260,6 +280,9 @@ class TimesheetApp(App):
         Binding("left_square_bracket", "alloc_prev_month", "[◄ Month", show=False),
         Binding("right_square_bracket", "alloc_next_month", "Month ►]", show=False),
         Binding("R", "export_allocations", "Report"),
+        Binding("D", "manage_deliverables", "Deliverables"),
+        Binding("B", "billing_view", "Billing"),
+        Binding("f", "finalise_billing", "Finalise"),
     ]
 
     def __init__(self):
@@ -373,6 +396,10 @@ class TimesheetApp(App):
         yield Container(TimesheetDataTable(id="allocations-table"), id="allocations-table-container", classes="hidden")
         yield DayDescription(id="alloc-description", classes="hidden")
         yield Static(id="allocations-summary", classes="hidden")
+        # Billing view widgets (hidden by default)
+        yield Static(id="billing-header", classes="hidden")
+        yield Container(TimesheetDataTable(id="billing-table"), id="billing-table-container", classes="hidden")
+        yield Static(id="billing-summary", classes="hidden")
         yield Footer()
 
     def on_mount(self):
@@ -381,6 +408,7 @@ class TimesheetApp(App):
         self._setup_year_table()
         self._setup_day_table()
         self._setup_allocations_table()
+        self._setup_billing_table()
         self._load_month_data()
         # Ensure header matches initial state
         header = self.query_one("#combined-header", CombinedHeader)
@@ -525,6 +553,8 @@ class TimesheetApp(App):
             self._refresh_day_display()
         elif self.view_mode == "allocations":
             self._refresh_allocations_display()
+        elif self.view_mode == "billing":
+            self._refresh_billing_display()
 
     def _refresh_week_display(self):
         # Update combined header
@@ -1252,8 +1282,9 @@ class TimesheetApp(App):
             else:
                 # Right-justify all day headers for consistency (extra width for circle icon)
                 table.add_column(f"{day:>5}", width=5)
-        table.add_column("Alloc", width=6)
-        table.add_column("Entered", width=7)
+        # Separator + totals columns
+        table.add_column("Alloc", width=7)
+        table.add_column("Entered", width=8)
         if show_points:
             table.add_column("Pts", width=5)
 
@@ -1300,9 +1331,15 @@ class TimesheetApp(App):
 
                 row_data.append(cell)
 
-            row_data.append(Text(f"{float(row_total):g}", style="bold"))
+            alloc_cell = Text()
+            alloc_cell.append("│", style="dim")
+            alloc_cell.append(f"{float(row_total):>5g}", style="bold")
+            row_data.append(alloc_cell)
             entered_style = "bold" if row_entered == row_total else "bold red"
-            row_data.append(Text(f"{float(row_entered):g}", style=entered_style))
+            entered_cell = Text()
+            entered_cell.append("│", style="dim")
+            entered_cell.append(f"{float(row_entered):>6g}", style=entered_style)
+            row_data.append(entered_cell)
             if show_points:
                 total_lifetime = lifetime_hours.get(ticket_id, Decimal("0"))
                 pts = calculate_points(total_lifetime, config.hours_per_point)
@@ -1383,13 +1420,28 @@ class TimesheetApp(App):
                 cell.append("     ", style="dim")
                 week_total_row.append(cell)
 
+        # Show partial final week total if the month doesn't end on a Friday
+        if week_total > 0:
+            # Find the last day shown
+            last_day = days_to_show[-1] if days_to_show else 0
+            last_d = date(self.current_year, self.current_month, last_day) if last_day else None
+            if last_d and last_d.weekday() != 4:  # Not a Friday
+                # Replace the last cell in week_total_row with the partial total
+                week_total_row[-1] = Text(f"{float(week_total):>5g}", style="bold")
+
         total_allocated = sum((a.hours for a in allocations), Decimal("0"))
 
-        worked_row.extend([Text(""), Text("")])
-        status_row.extend([Text(""), Text("")])
+        worked_row.extend([Text("│", style="dim"), Text("│", style="dim")])
+        status_row.extend([Text("│", style="dim"), Text("│", style="dim")])
         entered_style = "bold" if month_entered == total_allocated else "bold red"
-        week_total_row.append(Text(f"{float(month_total):g}", style="bold"))
-        week_total_row.append(Text(f"{float(month_entered):g}", style=entered_style))
+        alloc_cell = Text()
+        alloc_cell.append("│", style="dim")
+        alloc_cell.append(f"{float(month_total):>5g}", style="bold")
+        week_total_row.append(alloc_cell)
+        entered_cell = Text()
+        entered_cell.append("│", style="dim")
+        entered_cell.append(f"{float(month_entered):>6g}", style=entered_style)
+        week_total_row.append(entered_cell)
 
         # Points totals for summary rows
         billable_pts = 0
@@ -1464,6 +1516,8 @@ class TimesheetApp(App):
         day_widgets = ["#day-header", "#day-time-entry", "#day-table-container", "#day-summary", "#day-description"]
         # Allocations report widgets
         alloc_widgets = ["#allocations-header", "#allocations-table-container", "#alloc-description", "#allocations-summary"]
+        # Billing view widgets
+        billing_widgets = ["#billing-header", "#billing-table-container", "#billing-summary"]
 
         for widget_id in week_widgets:
             widget = self.query_one(widget_id)
@@ -1500,6 +1554,13 @@ class TimesheetApp(App):
             else:
                 widget.add_class("hidden")
 
+        for widget_id in billing_widgets:
+            widget = self.query_one(widget_id)
+            if mode == "billing":
+                widget.remove_class("hidden")
+            else:
+                widget.add_class("hidden")
+
         # Update binding visibility based on view mode
         self._update_bindings_for_mode(mode)
 
@@ -1516,6 +1577,8 @@ class TimesheetApp(App):
             self.query_one("#day-table", DataTable).focus()
         elif mode == "allocations":
             self.query_one("#allocations-table", DataTable).focus()
+        elif mode == "billing":
+            self.query_one("#billing-table", DataTable).focus()
 
     def _update_bindings_for_mode(self, mode: str):
         """Update footer bindings based on view mode."""
@@ -1552,11 +1615,17 @@ class TimesheetApp(App):
             # Only show Entered toggle in day view
             return True if self.view_mode == "day" else None
         elif action == "allocations_view":
-            return self.view_mode != "allocations"
+            return self.view_mode not in ("allocations", "billing")
         elif action == "toggle_points_entered":
             return True if self.view_mode == "allocations" else None
         elif action in ("alloc_prev_month", "alloc_next_month"):
-            return True if self.view_mode == "allocations" else None
+            return True if self.view_mode in ("allocations", "billing") else None
+        elif action == "billing_view":
+            return self.view_mode != "billing"
+        elif action == "finalise_billing":
+            return True if self.view_mode == "billing" else None
+        elif action == "manage_deliverables":
+            return True
         return True
 
     def action_prev_week(self):
@@ -1702,6 +1771,10 @@ class TimesheetApp(App):
     def action_manage_tickets(self):
         """Open ticket management screen."""
         self.push_screen(TicketManagementScreen())
+
+    def action_manage_deliverables(self):
+        """Open deliverable management screen."""
+        self.push_screen(DeliverableManagementScreen())
 
     def action_add_allocation(self):
         """Add a new allocation in day view."""
@@ -1971,6 +2044,12 @@ class TimesheetApp(App):
         if self.view_mode == "week":
             self.last_selected_date = self._get_selected_date()
         self._set_view_mode("allocations")
+
+    def action_billing_view(self):
+        """Switch to billing view."""
+        if self.view_mode == "week":
+            self.last_selected_date = self._get_selected_date()
+        self._set_view_mode("billing")
 
     def action_toggle_points_entered(self):
         """Toggle points entered state (binding action)."""
@@ -2665,6 +2744,138 @@ class TimesheetApp(App):
             handle_result,
         )
 
+    def _setup_billing_table(self):
+        """Set up the billing table columns."""
+        table = self.query_one("#billing-table", DataTable)
+        table.cursor_type = "row"
+        table.add_column("Deliverable", width=12, key="del_id")
+        table.add_column("Title", width=30, key="title")
+        table.add_column("Work Package", width=10, key="wp")
+        table.add_column("Hours", width=8, key="hours")
+        table.add_column("Points", width=8, key="points")
+        table.add_column("Ex VAT", width=12, key="ex_vat")
+        table.add_column("Inc VAT", width=12, key="inc_vat")
+
+    def _refresh_billing_display(self):
+        """Refresh the billing view."""
+        config = storage.get_config()
+        month_name = date(self.current_year, self.current_month, 1).strftime("%B %Y")
+
+        # Get billing data
+        billing = storage.get_monthly_billing(self.current_year, self.current_month)
+        budget = storage.get_monthly_point_budget(
+            self.current_year, self.current_month,
+        )
+
+        lines = storage.get_billing_summary_for_month(
+            self.current_year,
+            self.current_month,
+            hours_per_point=config.hours_per_point,
+            point_rate=config.point_rate,
+            vat_rate=config.vat_rate,
+        )
+
+        # Update header
+        status = " [FINALISED]" if billing.finalised else ""
+        header = self.query_one("#billing-header", Static)
+        header.update(f"  Billing - {month_name}{status}  [◄ ] / [ ►]")
+
+        # Populate table
+        table = self.query_one("#billing-table", DataTable)
+        table.clear()
+
+        total_hours = Decimal("0")
+        total_points = Decimal("0")
+        total_ex = Decimal("0")
+        total_inc = Decimal("0")
+
+        for line in lines:
+            del_label = line.deliverable_id or "UNLINKED"
+            table.add_row(
+                del_label,
+                line.deliverable_title[:30],
+                line.work_package_id,
+                str(line.hours),
+                str(line.points),
+                f"£{line.amount_ex_vat:,.2f}",
+                f"£{line.amount_inc_vat:,.2f}",
+                key=line.deliverable_id or "unlinked",
+            )
+            total_hours += line.hours
+            total_points += line.points
+            total_ex += line.amount_ex_vat
+            total_inc += line.amount_inc_vat
+
+        # Add totals row
+        if lines:
+            table.add_row(
+                "TOTAL", "", "",
+                str(total_hours),
+                str(total_points),
+                f"£{total_ex:,.2f}",
+                f"£{total_inc:,.2f}",
+                key="__total__",
+            )
+
+        # Build summary
+        budget_str = f"{budget} pts" if budget else "N/A"
+        remaining = Decimal(str(budget)) - total_points if budget else Decimal("0")
+
+        # Year-to-date
+        ytd_points = Decimal("0")
+        if config.contract_start:
+            ytd_points = storage.get_year_to_date_points(
+                config.contract_start,
+                self.current_year,
+                self.current_month,
+                config.hours_per_point,
+            )
+
+        annual_remaining = Decimal(str(config.annual_max_points)) - ytd_points
+
+        summary_parts = [
+            f"Month: {total_points} pts / {budget_str} budget"
+            f" ({remaining} remaining)",
+            f"Year-to-date: {ytd_points} pts / {config.annual_max_points} annual max"
+            f" ({annual_remaining} remaining)",
+            f"Rate: £{config.point_rate}/pt (1 pt = {config.hours_per_point}h)"
+            f"  |  VAT: {config.vat_rate * 100:.0f}%",
+        ]
+        if billing.finalised:
+            summary_parts.append("Status: FINALISED")
+        else:
+            summary_parts.append("Press [f] to finalise this month")
+
+        # Check for unlinked allocations
+        unlinked = [ln for ln in lines if ln.deliverable_id is None]
+        if unlinked:
+            summary_parts.append(
+                f"WARNING: {unlinked[0].hours}h on tickets with no deliverable assigned"
+            )
+
+        self.query_one("#billing-summary", Static).update("\n".join(summary_parts))
+
+    def action_finalise_billing(self) -> None:
+        """Toggle finalisation of the current month's billing."""
+        if self.view_mode != "billing":
+            return
+
+        billing = storage.get_monthly_billing(
+            self.current_year, self.current_month,
+        )
+        if billing.finalised:
+            msg = "Unfinalise this month's billing?"
+        else:
+            msg = "Finalise this month's billing?"
+
+        def handle_confirm(confirmed: bool | None) -> None:
+            if confirmed:
+                billing.finalised = not billing.finalised
+                storage.save_monthly_billing(billing)
+                self._refresh_billing_display()
+
+        self.push_screen(ConfirmScreen(msg), handle_confirm)
+
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         """Handle cell selection events (no-op for allocations; handled by key/double-click)."""
 
@@ -2680,6 +2891,7 @@ class TimesheetApp(App):
             "week": "week-table",
             "day": "day-table",
             "allocations": "allocations-table",
+            "billing": "billing-table",
         }
 
         # Only process if the event is from the expected table for this view mode

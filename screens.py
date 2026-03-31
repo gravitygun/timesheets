@@ -81,6 +81,7 @@ class EditDayScreen(ModalScreen[TimeEntry | None]):
     #edit-dialog {
         width: 70;
         height: auto;
+        max-height: 85%;
         padding: 1 2;
         background: $surface;
         border: thick $primary;
@@ -294,6 +295,106 @@ class EditDayScreen(ModalScreen[TimeEntry | None]):
         self.dismiss(updated)
 
 
+class DeliverableSelectScreen(ModalScreen[str | None | bool]):
+    """Modal screen to select a deliverable.
+
+    Returns:
+        str: The selected deliverable ID
+        None: Clear the deliverable
+        False: Cancelled (no change)
+    """
+
+    CSS = """
+    DeliverableSelectScreen {
+        align: center middle;
+    }
+
+    #del-select-dialog {
+        width: 80;
+        height: 80%;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    #del-select-title {
+        width: 100%;
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #del-select-table {
+        height: 1fr;
+    }
+
+    #del-select-buttons {
+        height: 3;
+        margin-top: 1;
+        align: center middle;
+    }
+
+    #del-select-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, current_id: str | None = None) -> None:
+        super().__init__()
+        self.current_id = current_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="del-select-dialog"):
+            yield Label("Select Deliverable", id="del-select-title")
+            yield DataTable(id="del-select-table")
+            with Horizontal(id="del-select-buttons"):
+                yield Button("Clear", variant="warning", id="clear-btn")
+                yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#del-select-table", DataTable)
+        table.cursor_type = "row"
+        table.add_column("ID", width=10, key="id")
+        table.add_column("Title", width=35, key="title")
+        table.add_column("Work Package", width=28, key="wp")
+        self._refresh_table()
+
+    def _refresh_table(self) -> None:
+        table = self.query_one("#del-select-table", DataTable)
+        table.clear()
+
+        deliverables = storage.get_all_deliverables(active_only=True)
+        work_packages = {wp.id: wp.title for wp in storage.get_all_work_packages()}
+
+        highlight_row: int | None = None
+        for i, d in enumerate(deliverables):
+            wp_label = f"{d.work_package_id}: {work_packages.get(d.work_package_id, '')}"
+            table.add_row(d.id, d.title, wp_label, key=d.id)
+            if d.id == self.current_id:
+                highlight_row = i
+
+        if highlight_row is not None:
+            table.move_cursor(row=highlight_row)
+        table.focus()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.control.id == "del-select-table" and event.row_key:
+            self.dismiss(str(event.row_key.value))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(False)
+        elif event.button.id == "clear-btn":
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class EditTicketScreen(ModalScreen[Ticket | None]):
     """Modal screen for creating or editing a ticket."""
 
@@ -333,6 +434,24 @@ class EditTicketScreen(ModalScreen[Ticket | None]):
         width: 100%;
     }
 
+    #deliverable-row {
+        width: 100%;
+        height: 3;
+        margin-bottom: 1;
+    }
+
+    #deliverable-label {
+        width: 1fr;
+        height: 3;
+        padding: 1 1;
+        background: $boost;
+    }
+
+    #pick-deliverable {
+        width: auto;
+        min-width: 10;
+    }
+
     #ticket-buttons {
         width: 100%;
         height: auto;
@@ -354,6 +473,9 @@ class EditTicketScreen(ModalScreen[Ticket | None]):
     def __init__(self, ticket: Ticket | None = None):
         super().__init__()
         self.ticket = ticket  # None means creating new
+        self._deliverable_id: str | None = (
+            ticket.deliverable_id if ticket else None
+        )
 
     def compose(self) -> ComposeResult:
         title = "Edit Ticket" if self.ticket else "New Ticket"
@@ -378,9 +500,27 @@ class EditTicketScreen(ModalScreen[Ticket | None]):
                     id="ticket-description",
                 )
 
+            with Vertical(classes="field-group"):
+                yield Label("Deliverable", classes="field-label")
+                with Horizontal(id="deliverable-row"):
+                    yield Label(
+                        self._format_deliverable_label(),
+                        id="deliverable-label",
+                    )
+                    yield Button("Pick", id="pick-deliverable")
+
             with Horizontal(id="ticket-buttons"):
                 yield Button("Save", variant="primary", id="save")
                 yield Button("Cancel", variant="default", id="cancel")
+
+    def _format_deliverable_label(self) -> str:
+        """Format the deliverable display label."""
+        if not self._deliverable_id:
+            return "None"
+        d = storage.get_deliverable(self._deliverable_id)
+        if d:
+            return f"{d.id}: {d.title}"
+        return self._deliverable_id
 
     def on_mount(self) -> None:
         """Focus the appropriate field on mount."""
@@ -401,6 +541,23 @@ class EditTicketScreen(ModalScreen[Ticket | None]):
             self.dismiss(None)
         elif event.button.id == "save":
             self._save_ticket()
+        elif event.button.id == "pick-deliverable":
+            self._pick_deliverable()
+
+    def _pick_deliverable(self) -> None:
+        """Open the deliverable select screen."""
+        def handle_result(result: str | None | bool) -> None:
+            if result is False:
+                return  # Cancelled
+            # result is None (clear) or a deliverable ID string
+            self._deliverable_id = result if isinstance(result, str) else None
+            self.query_one("#deliverable-label", Label).update(
+                self._format_deliverable_label()
+            )
+
+        self.app.push_screen(
+            DeliverableSelectScreen(self._deliverable_id), handle_result,
+        )
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -431,6 +588,8 @@ class EditTicketScreen(ModalScreen[Ticket | None]):
             description=description,
             archived=self.ticket.archived if self.ticket else False,
             created_at=self.ticket.created_at if self.ticket else date.today(),
+            points_entered=self.ticket.points_entered if self.ticket else False,
+            deliverable_id=self._deliverable_id,
         )
         self.dismiss(ticket)
 
@@ -444,8 +603,8 @@ class TicketManagementScreen(ModalScreen[None]):
     }
 
     #tickets-dialog {
-        width: 80;
-        height: 24;
+        width: 95;
+        height: 85%;
         padding: 1 2;
         background: $surface;
         border: thick $primary;
@@ -492,10 +651,10 @@ class TicketManagementScreen(ModalScreen[None]):
     """
 
     BINDINGS = [
-        Binding("escape", "close", "Close"),
+        Binding("escape", "close", "Dismiss"),
         Binding("n", "new_ticket", "New"),
         Binding("e", "edit_ticket", "Edit"),
-        Binding("a", "toggle_archive", "Archive"),
+        Binding("a", "toggle_archive", "Close Ticket"),
         Binding("p", "toggle_points_entered", "Pts Entered"),
         Binding("d", "delete_ticket", "Delete"),
     ]
@@ -510,26 +669,27 @@ class TicketManagementScreen(ModalScreen[None]):
 
             with Horizontal(id="tickets-controls"):
                 yield Input(placeholder="Search...", id="tickets-search")
-                yield Checkbox("Show archived", id="tickets-show-archived")
+                yield Checkbox("Show closed", id="tickets-show-archived")
 
             yield DataTable(id="tickets-table")
 
             with Horizontal(id="tickets-footer"):
                 yield Button("New [n]", id="btn-new")
                 yield Button("Edit [e]", id="btn-edit")
-                yield Button("Archive [a]", id="btn-archive")
+                yield Button("Close Ticket [a]", id="btn-archive")
                 yield Button("Pts Entered [p]", id="btn-pts-entered")
                 yield Button("Delete [d]", id="btn-delete")
-                yield Button("Close [Esc]", id="btn-close")
+                yield Button("Dismiss [Esc]", id="btn-close")
 
     def on_mount(self) -> None:
         """Set up the table and load data."""
         table = self.query_one("#tickets-table", DataTable)
         table.cursor_type = "row"
         table.add_column("ID", width=10)
-        table.add_column("Description", width=40)
+        table.add_column("Description", width=35)
+        table.add_column("Deliverable", width=12)
         table.add_column("Status", width=10)
-        table.add_column("Pts Entered", width=12)
+        table.add_column("Pts", width=4)
         self._refresh_table()
         self.query_one("#tickets-search", Input).focus()
 
@@ -544,11 +704,13 @@ class TicketManagementScreen(ModalScreen[None]):
             tickets = storage.get_all_tickets(include_archived=self.show_archived)
 
         for ticket in tickets:
-            status = "Archived" if ticket.archived else "Active"
-            pts_entered = "Yes" if ticket.points_entered else ""
+            status = "Closed" if ticket.archived else "Open"
+            pts_entered = "Y" if ticket.points_entered else ""
+            del_label = ticket.deliverable_id if ticket.deliverable_id else "!"
             table.add_row(
                 ticket.id,
-                ticket.description[:40],
+                ticket.description[:35],
+                del_label,
                 status,
                 pts_entered,
                 key=ticket.id,
@@ -632,7 +794,7 @@ class TicketManagementScreen(ModalScreen[None]):
             self._refresh_table(search)
 
     def action_toggle_archive(self) -> None:
-        """Archive or unarchive the selected ticket."""
+        """Close or reopen the selected ticket."""
         ticket_id = self._get_selected_ticket_id()
         if not ticket_id:
             self.app.notify("No ticket selected", severity="warning")
@@ -642,10 +804,10 @@ class TicketManagementScreen(ModalScreen[None]):
         if ticket:
             if ticket.archived:
                 storage.unarchive_ticket(ticket_id)
-                self.app.notify(f"Ticket {ticket_id} unarchived")
+                self.app.notify(f"Ticket {ticket_id} reopened")
             else:
                 storage.archive_ticket(ticket_id)
-                self.app.notify(f"Ticket {ticket_id} archived")
+                self.app.notify(f"Ticket {ticket_id} closed")
             search = self.query_one("#tickets-search", Input).value
             self._refresh_table(search)
 
@@ -694,6 +856,371 @@ class TicketManagementScreen(ModalScreen[None]):
                 self._refresh_table(search)
 
 
+class DeliverableManagementScreen(ModalScreen[None]):
+    """Modal screen for managing work packages and deliverables."""
+
+    CSS = """
+    DeliverableManagementScreen {
+        align: center middle;
+    }
+
+    #del-mgmt-dialog {
+        width: 90;
+        height: 85%;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    #del-mgmt-title {
+        width: 100%;
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #del-mgmt-table {
+        height: 1fr;
+    }
+
+    #del-mgmt-footer {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        align: center middle;
+    }
+
+    #del-mgmt-footer Button {
+        width: auto;
+        min-width: 10;
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Dismiss"),
+        Binding("w", "new_work_package", "New WP"),
+        Binding("n", "new_deliverable", "New Del"),
+        Binding("e", "edit_item", "Edit"),
+        Binding("a", "toggle_active", "Active"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="del-mgmt-dialog"):
+            yield Label("Deliverable Management", id="del-mgmt-title")
+            yield DataTable(id="del-mgmt-table")
+            with Horizontal(id="del-mgmt-footer"):
+                yield Button("New WP [w]", id="btn-new-wp")
+                yield Button("New Del [n]", id="btn-new-del")
+                yield Button("Edit [e]", id="btn-edit")
+                yield Button("Toggle Active [a]", id="btn-toggle")
+                yield Button("Dismiss [Esc]", id="btn-close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#del-mgmt-table", DataTable)
+        table.cursor_type = "row"
+        table.add_column("Type", width=5)
+        table.add_column("ID", width=10)
+        table.add_column("Title", width=45)
+        table.add_column("Active", width=7)
+        self._refresh_table()
+
+    def _refresh_table(self) -> None:
+        table = self.query_one("#del-mgmt-table", DataTable)
+        table.clear()
+
+        work_packages = storage.get_all_work_packages()
+        for wp in work_packages:
+            table.add_row("WP", wp.id, wp.title, "", key=f"wp:{wp.id}")
+            deliverables = storage.get_deliverables_for_work_package(
+                wp.id, active_only=False,
+            )
+            for d in deliverables:
+                active = "Yes" if d.active else "No"
+                table.add_row("  Del", d.id, f"  {d.title}", active, key=f"del:{d.id}")
+
+    def _get_selected_key(self) -> tuple[str, str] | None:
+        """Get the type and ID of the selected row. Returns ('wp', id) or ('del', id)."""
+        table = self.query_one("#del-mgmt-table", DataTable)
+        if table.row_count == 0:
+            return None
+        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+        key_str = str(row_key.value)
+        if key_str.startswith("wp:"):
+            return ("wp", key_str[3:])
+        if key_str.startswith("del:"):
+            return ("del", key_str[4:])
+        return None
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Handle Enter on table row - edit the item."""
+        if event.control.id == "del-mgmt-table":
+            self.action_edit_item()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-close":
+            self.dismiss(None)
+        elif event.button.id == "btn-new-wp":
+            self.action_new_work_package()
+        elif event.button.id == "btn-new-del":
+            self.action_new_deliverable()
+        elif event.button.id == "btn-edit":
+            self.action_edit_item()
+        elif event.button.id == "btn-toggle":
+            self.action_toggle_active()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def action_new_work_package(self) -> None:
+        """Create a new work package."""
+        self.app.push_screen(
+            EditWorkPackageScreen(), self._on_wp_saved,
+        )
+
+    def _on_wp_saved(self, result: tuple[str, str] | None) -> None:
+        if result:
+            from models import WorkPackage
+            wp = WorkPackage(id=result[0], title=result[1])
+            storage.save_work_package(wp)
+            self.app.notify(f"Work package {wp.id} saved")
+            self._refresh_table()
+
+    def action_new_deliverable(self) -> None:
+        """Create a new deliverable."""
+        self.app.push_screen(
+            EditDeliverableScreen(), self._on_del_saved,
+        )
+
+    def _on_del_saved(self, result: tuple[str, str, str] | None) -> None:
+        if result:
+            from models import Deliverable
+            d = Deliverable(id=result[0], work_package_id=result[1], title=result[2])
+            storage.save_deliverable(d)
+            self.app.notify(f"Deliverable {d.id} saved")
+            self._refresh_table()
+
+    def action_edit_item(self) -> None:
+        """Edit the selected work package or deliverable."""
+        selected = self._get_selected_key()
+        if not selected:
+            return
+
+        item_type, item_id = selected
+        if item_type == "wp":
+            wp = storage.get_work_package(item_id)
+            if wp:
+                self.app.push_screen(
+                    EditWorkPackageScreen(wp.id, wp.title),
+                    self._on_wp_saved,
+                )
+        elif item_type == "del":
+            d = storage.get_deliverable(item_id)
+            if d:
+                self.app.push_screen(
+                    EditDeliverableScreen(d.id, d.work_package_id, d.title),
+                    self._on_del_saved,
+                )
+
+    def action_toggle_active(self) -> None:
+        """Toggle active state of a deliverable."""
+        selected = self._get_selected_key()
+        if not selected or selected[0] != "del":
+            self.app.notify("Select a deliverable to toggle", severity="warning")
+            return
+
+        d = storage.get_deliverable(selected[1])
+        if d:
+            d.active = not d.active
+            storage.save_deliverable(d)
+            self._refresh_table()
+
+
+class EditWorkPackageScreen(ModalScreen[tuple[str, str] | None]):
+    """Modal for editing a work package ID and title."""
+
+    CSS = """
+    EditWorkPackageScreen {
+        align: center middle;
+    }
+
+    #wp-edit-dialog {
+        width: 50;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    #wp-edit-dialog Input {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    #wp-edit-buttons {
+        height: 3;
+        align: center middle;
+    }
+
+    #wp-edit-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    def __init__(
+        self, wp_id: str = "", title: str = "",
+    ) -> None:
+        super().__init__()
+        self.wp_id = wp_id
+        self.wp_title = title
+        self.is_edit = bool(wp_id)
+
+    def compose(self) -> ComposeResult:
+        label = "Edit Work Package" if self.is_edit else "New Work Package"
+        with Vertical(id="wp-edit-dialog"):
+            yield Label(label)
+            yield Label("ID (e.g. WP2a):", classes="field-label")
+            yield Input(
+                value=self.wp_id, id="wp-id",
+                disabled=self.is_edit,
+            )
+            yield Label("Title:", classes="field-label")
+            yield Input(value=self.wp_title, id="wp-title")
+            with Horizontal(id="wp-edit-buttons"):
+                yield Button("Save", variant="primary", id="save")
+                yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        if self.is_edit:
+            self.query_one("#wp-title", Input).focus()
+        else:
+            self.query_one("#wp-id", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "wp-id":
+            self.query_one("#wp-title", Input).focus()
+        elif event.input.id == "wp-title":
+            self._save()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "save":
+            self._save()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _save(self) -> None:
+        wp_id = self.query_one("#wp-id", Input).value.strip()
+        title = self.query_one("#wp-title", Input).value.strip()
+        if not wp_id or not title:
+            self.app.notify("Both fields are required", severity="error")
+            return
+        self.dismiss((wp_id, title))
+
+
+class EditDeliverableScreen(ModalScreen[tuple[str, str, str] | None]):
+    """Modal for editing a deliverable."""
+
+    CSS = """
+    EditDeliverableScreen {
+        align: center middle;
+    }
+
+    #del-edit-dialog {
+        width: 55;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    #del-edit-dialog Input {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    #del-edit-buttons {
+        height: 3;
+        align: center middle;
+    }
+
+    #del-edit-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    def __init__(
+        self, del_id: str = "", wp_id: str = "", title: str = "",
+    ) -> None:
+        super().__init__()
+        self.del_id = del_id
+        self.del_wp_id = wp_id
+        self.del_title = title
+        self.is_edit = bool(del_id)
+
+    def compose(self) -> ComposeResult:
+        label = "Edit Deliverable" if self.is_edit else "New Deliverable"
+        with Vertical(id="del-edit-dialog"):
+            yield Label(label)
+            yield Label("ID (e.g. WP2a-D1):", classes="field-label")
+            yield Input(
+                value=self.del_id, id="del-id",
+                disabled=self.is_edit,
+            )
+            yield Label("Work Package ID:", classes="field-label")
+            yield Input(
+                value=self.del_wp_id, id="del-wp-id",
+                disabled=self.is_edit,
+            )
+            yield Label("Title:", classes="field-label")
+            yield Input(value=self.del_title, id="del-title")
+            with Horizontal(id="del-edit-buttons"):
+                yield Button("Save", variant="primary", id="save")
+                yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        if self.is_edit:
+            self.query_one("#del-title", Input).focus()
+        else:
+            self.query_one("#del-id", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "del-id":
+            self.query_one("#del-wp-id", Input).focus()
+        elif event.input.id == "del-wp-id":
+            self.query_one("#del-title", Input).focus()
+        elif event.input.id == "del-title":
+            self._save()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "save":
+            self._save()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _save(self) -> None:
+        del_id = self.query_one("#del-id", Input).value.strip()
+        wp_id = self.query_one("#del-wp-id", Input).value.strip()
+        title = self.query_one("#del-title", Input).value.strip()
+        if not del_id or not wp_id or not title:
+            self.app.notify("All fields are required", severity="error")
+            return
+        # Validate work package exists
+        if not storage.get_work_package(wp_id):
+            self.app.notify(f"Work package {wp_id} does not exist", severity="error")
+            return
+        self.dismiss((del_id, wp_id, title))
+
+
 class TicketSelectScreen(ModalScreen[Ticket | None]):
     """Modal screen for selecting a ticket with search."""
 
@@ -704,7 +1231,7 @@ class TicketSelectScreen(ModalScreen[Ticket | None]):
 
     #select-dialog {
         width: 70;
-        height: 20;
+        height: 80%;
         padding: 1 2;
         background: $surface;
         border: thick $primary;

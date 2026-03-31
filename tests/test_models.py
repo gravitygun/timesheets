@@ -188,7 +188,7 @@ class TestConfig:
         """Test default values for points-related config fields."""
         config = Config()
         assert config.hours_per_point == Decimal("2")
-        assert config.point_rate == Decimal("210")
+        assert config.point_rate == Decimal("200")
         assert config.points_start_date is None
 
     def test_custom_points_fields(self):
