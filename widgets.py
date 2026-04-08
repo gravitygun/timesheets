@@ -23,7 +23,7 @@ class CombinedHeader(Static):
 
     def update_display(self, week_num: int, total_weeks: int, week_start: date, week_end: date):
         month_name = date(self.year, self.month, 1).strftime("%B %Y")
-        title = f"WEEK {week_num}: {month_name}"
+        title = f"TIMESHEET: WEEK {week_num} {month_name}"
         start_str = week_start.strftime("%b %d")
         end_str = week_end.strftime("%b %d")
         week_nav = f"◄ {week_num}/{total_weeks} ({start_str} - {end_str}) ►"
@@ -125,7 +125,7 @@ class DayHeader(Static):
         self.current_date = d
         self.worked_hours = worked_hours
         day_str = d.strftime("%a %b %d, %Y")
-        title = f"DAY: {day_str}"
+        title = f"ALLOCATIONS: {day_str}"
 
         text = Text()
         text.append(title, style="bold")

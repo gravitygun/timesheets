@@ -204,7 +204,7 @@ class TestDayHeader:
         call_args = header.update.call_args[0][0]
         text_str = str(call_args)
 
-        assert "DAY:" in text_str
+        assert "ALLOCATIONS:" in text_str
         assert "Tue" in text_str
         assert "Jan 27" in text_str
         assert "2026" in text_str
@@ -220,7 +220,7 @@ class TestDayHeader:
         call_args = header.update.call_args[0][0]
         text_str = str(call_args)
         # Header no longer shows worked hours (now in DaySummary)
-        assert "DAY:" in text_str
+        assert "ALLOCATIONS:" in text_str
 
 
 class TestDaySummary:

@@ -912,7 +912,7 @@ class DeliverableManagementScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="del-mgmt-dialog"):
-            yield Label("Deliverable Management", id="del-mgmt-title")
+            yield Label("Deliverables Management", id="del-mgmt-title")
             yield DataTable(id="del-mgmt-table")
             with Horizontal(id="del-mgmt-footer"):
                 yield Button("New WP [w]", id="btn-new-wp")

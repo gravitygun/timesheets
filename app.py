@@ -735,7 +735,7 @@ class TimesheetApp(App):
         # Update month header
         month_header = self.query_one("#month-header", Static)
         month_name = date(self.current_year, self.current_month, 1).strftime("%B %Y")
-        month_header.update(Text(f"MONTH: {month_name}", style="bold"))
+        month_header.update(Text(f"TIMESHEET: {month_name}", style="bold"))
 
         # Build table data
         table = self.query_one("#month-table", DataTable)
@@ -938,7 +938,7 @@ class TimesheetApp(App):
         # Update year header
         year_header = self.query_one("#year-header", Static)
         year_label = f"{self.company_year_start}-{self.company_year_start + 1}"
-        year_header.update(Text(f"YEAR: {year_label}", style="bold"))
+        year_header.update(Text(f"TIMESHEET: {year_label}", style="bold"))
 
         # Build table data
         table = self.query_one("#year-table", DataTable)
@@ -2797,7 +2797,7 @@ class TimesheetApp(App):
         # Update header
         status = " [FINALISED]" if billing.finalised else ""
         header = self.query_one("#billing-header", Static)
-        header.update(f"  Billing - {month_name}{status}  [◄ ] / [ ►]")
+        header.update(f"  BILLING: {month_name}{status}  [◄ ] / [ ►]")
 
         # Populate table
         table = self.query_one("#billing-table", DataTable)
@@ -2863,7 +2863,7 @@ class TimesheetApp(App):
         if billing.finalised:
             summary_parts.append("Status: FINALISED")
         else:
-            summary_parts.append("Press [f] to finalise this month")
+            summary_parts.append("Press [bold]f[/bold] to finalise this month")
 
         # Check for unlinked allocations
         unlinked = [ln for ln in lines if ln.deliverable_id is None]
