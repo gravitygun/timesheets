@@ -1586,46 +1586,65 @@ class TimesheetApp(App):
         self.refresh_bindings()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Check if an action is available based on current view mode."""
+        """Check if an action is available based on current view mode.
+
+        Returns True to show and enable, False to hide completely,
+        and None to show greyed out (disabled).
+        """
+        mode = self.view_mode
+
+        # View switching — hide the current view's own key
         if action == "week_view":
-            # Show in day view (goes back to week) but not in week view itself
-            return self.view_mode != "week"
+            return mode != "week"
         elif action == "month_view":
-            return self.view_mode not in ("month", "day")
+            return mode not in ("month", "day")
         elif action == "year_view":
-            return self.view_mode not in ("year", "day")
-        elif action == "populate_holidays":
-            return self.view_mode == "year"
-        elif action == "edit_day":
-            # Show Edit in week view, day view, and allocations view
-            return True if self.view_mode in ("week", "day", "allocations") else None
-        elif action == "add_allocation":
-            # Show Add in day view and allocations view
-            return True if self.view_mode in ("day", "allocations") else None
-        elif action == "delete_allocation":
-            # Show Delete in day view and allocations view
-            return True if self.view_mode in ("day", "allocations") else None
-        elif action == "move_allocation":
-            # Show Move in day view and allocations view
-            return True if self.view_mode in ("day", "allocations") else None
-        elif action == "back_to_week":
-            # Only show Back in day view
-            return True if self.view_mode == "day" else None
-        elif action == "toggle_entered":
-            # Only show Entered toggle in day view
-            return True if self.view_mode == "day" else None
+            return mode not in ("year", "day")
         elif action == "allocations_view":
-            return self.view_mode not in ("allocations", "billing")
-        elif action == "toggle_points_entered":
-            return True if self.view_mode == "allocations" else None
-        elif action in ("alloc_prev_month", "alloc_next_month"):
-            return True if self.view_mode in ("allocations", "billing") else None
+            return mode not in ("allocations", "billing")
         elif action == "billing_view":
-            return self.view_mode != "billing"
+            return mode != "billing"
+
+        # Navigation
+        elif action == "goto_today":
+            return mode in ("week", "month") or False
+        elif action in ("alloc_prev_month", "alloc_next_month"):
+            return mode in ("allocations", "billing") or False
+
+        # Week/day view
+        elif action == "edit_day":
+            return mode in ("week", "day") or False
+        elif action == "toggle_money":
+            return mode in ("week", "month", "year") or False
+
+        # Year view only
+        elif action == "populate_holidays":
+            return mode == "year" or False
+
+        # Day view / allocations view — allocation operations
+        elif action in ("add_allocation", "delete_allocation", "move_allocation"):
+            return mode in ("day", "allocations") or False
+        elif action == "toggle_entered":
+            return mode == "day" or False
+        elif action == "back_to_week":
+            return mode == "day" or False
+
+        # Allocations view only
+        elif action == "toggle_points_entered":
+            return mode == "allocations" or False
+        elif action == "export_allocations":
+            return mode == "allocations" or False
+
+        # Billing view only
         elif action == "finalise_billing":
-            return True if self.view_mode == "billing" else None
+            return mode == "billing" or False
+
+        # Ticket/deliverable management — always available
+        elif action == "manage_tickets":
+            return True
         elif action == "manage_deliverables":
             return True
+
         return True
 
     def action_prev_week(self):
