@@ -646,6 +646,31 @@ def unarchive_ticket(ticket_id: str) -> None:
     conn.close()
 
 
+def rename_ticket(old_id: str, new_id: str) -> bool:
+    """Rename a ticket, updating all allocations to the new ID.
+
+    Returns True on success, False if the new ID already exists.
+    """
+    conn = get_connection()
+    existing = conn.execute(
+        "SELECT id FROM tickets WHERE id = ?", (new_id,),
+    ).fetchone()
+    if existing:
+        conn.close()
+        return False
+    conn.execute(
+        "UPDATE ticket_allocations SET ticket_id = ? WHERE ticket_id = ?",
+        (new_id, old_id),
+    )
+    conn.execute(
+        "UPDATE tickets SET id = ? WHERE id = ?",
+        (new_id, old_id),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
 def set_points_entered(ticket_id: str, entered: bool) -> None:
     """Set whether points have been entered in Jira for a ticket."""
     conn = get_connection()

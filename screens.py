@@ -489,7 +489,7 @@ class EditTicketScreen(ModalScreen[Ticket | None]):
                     placeholder="PROJ-123",
                     id="ticket-id",
                     max_length=8,
-                    disabled=self.ticket is not None,  # Can't change ID of existing
+                    disabled=False,
                 )
 
             with Vertical(classes="field-group"):
@@ -578,10 +578,15 @@ class EditTicketScreen(ModalScreen[Ticket | None]):
             self.app.notify("Ticket ID must be 8 characters or less", severity="error")
             return
 
-        # Check for duplicate ID when creating new
+        # Handle ID changes
+        is_rename = self.ticket and ticket_id != self.ticket.id
         if not self.ticket and storage.get_ticket(ticket_id):
             self.app.notify(f"Ticket {ticket_id} already exists", severity="error")
             return
+        if is_rename:
+            if not storage.rename_ticket(self.ticket.id, ticket_id):  # type: ignore[union-attr]
+                self.app.notify(f"Ticket {ticket_id} already exists", severity="error")
+                return
 
         ticket = Ticket(
             id=ticket_id,
