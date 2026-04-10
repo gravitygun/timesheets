@@ -478,6 +478,14 @@ class TimesheetApp(App):
         table.cursor_type = "cell"  # Cell mode for clicking individual allocations
         # Columns are added dynamically in _refresh_allocations_display
 
+    def _is_hourly_billing_month(self) -> bool:
+        """Check if the current month uses hourly billing (pre-contract)."""
+        config = storage.get_config()
+        if not config.contract_start:
+            return True
+        current = date(self.current_year, self.current_month, 1)
+        return current < config.contract_start
+
     def _rebuild_tables(self):
         """Rebuild table columns when show_money changes."""
         # Rebuild month table
@@ -491,7 +499,7 @@ class TimesheetApp(App):
         month_table.add_column("T", width=6)
         month_table.add_column("P", width=6)
         month_table.add_column("Total", width=8)
-        if self.show_money:
+        if self.show_money and self._is_hourly_billing_month():
             month_table.add_column("Bill", width=10)
             month_table.add_column("+VAT", width=10)
 
@@ -613,23 +621,9 @@ class TimesheetApp(App):
             config
         )
 
-        # Update earnings display
+        # Hide week earnings (hourly billing no longer applicable)
         week_earnings = self.query_one("#week-earnings", Static)
-        if self.show_money:
-            week_earnings.remove_class("hidden")
-            # Billable = worked hours only (not leave/sick/training/P/H)
-            billable_hours = week_worked
-            billable_amount = billable_hours * config.hourly_rate
-            vat_amount = billable_amount * config.vat_rate
-            total_with_vat = billable_amount + vat_amount
-            # Format amount to fixed width for alignment with summary below
-            amount_str = f"£{float(billable_amount):,.2f}"
-            vat_str = f"£{float(total_with_vat):,.2f}"
-            text = Text()
-            text.append(f"                                           Billable  {amount_str:>10}   ({vat_str} inc VAT)")
-            week_earnings.update(text)
-        else:
-            week_earnings.add_class("hidden")
+        week_earnings.add_class("hidden")
 
         # Update table
         table = self.query_one("#week-table", DataTable)
@@ -737,9 +731,20 @@ class TimesheetApp(App):
         month_name = date(self.current_year, self.current_month, 1).strftime("%B %Y")
         month_header.update(Text(f"TIMESHEET: {month_name}", style="bold"))
 
-        # Build table data
+        # Rebuild table columns (structure depends on billing model for this month)
         table = self.query_one("#month-table", DataTable)
-        table.clear()
+        table.clear(columns=True)
+        table.add_column("W/C Mon", width=12)
+        table.add_column("Worked", width=8)
+        table.add_column("Poss", width=8)
+        table.add_column("L", width=6)
+        table.add_column("S", width=6)
+        table.add_column("T", width=6)
+        table.add_column("P", width=6)
+        table.add_column("Total", width=8)
+        if self.show_money and self._is_hourly_billing_month():
+            table.add_column("Bill", width=10)
+            table.add_column("+VAT", width=10)
 
         # Month totals
         month_worked = Decimal("0")
@@ -783,11 +788,15 @@ class TimesheetApp(App):
                 Text(f"{float(totals['total']):g}h" if totals['total'] else "-", style=style),
             ]
 
-            if self.show_money:
+            if self.show_money and self._is_hourly_billing_month():
                 billable = totals['worked'] * config.hourly_rate
                 with_vat = billable * (1 + config.vat_rate)
-                row_data.append(Text(f"£{float(billable):,.0f}" if billable else "-", style=style))
-                row_data.append(Text(f"£{float(with_vat):,.0f}" if with_vat else "-", style=style))
+                row_data.append(Text(
+                    f"£{float(billable):,.0f}" if billable else "-", style=style,
+                ))
+                row_data.append(Text(
+                    f"£{float(with_vat):,.0f}" if with_vat else "-", style=style,
+                ))
 
             table.add_row(*row_data, key=f"{week_start.isoformat()}")
 
@@ -843,16 +852,98 @@ class TimesheetApp(App):
 
         month_summary.update(text)
 
-        # Update earnings display (between table and summary)
+        # Update earnings display
         month_earnings = self.query_one("#month-earnings", Static)
-        if self.show_money:
+        if self._is_hourly_billing_month():
+            # Pre-contract: hourly billing summary
+            if self.show_money:
+                month_earnings.remove_class("hidden")
+                month_billable = month_worked * config.hourly_rate
+                month_with_vat = month_billable * (1 + config.vat_rate)
+                amount_str = f"£{float(month_billable):,.2f}"
+                vat_str = f"£{float(month_with_vat):,.2f}"
+                earnings_text = Text()
+                earnings_text.append(
+                    f"                                           Billable"
+                    f"  {amount_str:>10}   ({vat_str} inc VAT)",
+                )
+                month_earnings.update(earnings_text)
+            else:
+                month_earnings.add_class("hidden")
+        elif config.contract_start:
+            # Post-contract: points-based summary
             month_earnings.remove_class("hidden")
-            month_billable = month_worked * config.hourly_rate
-            month_with_vat = month_billable * (1 + config.vat_rate)
-            amount_str = f"£{float(month_billable):,.2f}"
-            vat_str = f"£{float(month_with_vat):,.2f}"
             earnings_text = Text()
-            earnings_text.append(f"                                           Billable  {amount_str:>10}   ({vat_str} inc VAT)")
+
+            # Points breakdown for this month
+            billable_pts, speculative_pts = storage.get_monthly_points_breakdown(
+                self.current_year, self.current_month, config.hours_per_point,
+            )
+
+            # Contract year runs Apr-Mar
+            cy_start = config.contract_start
+            ytd_pts = storage.get_year_to_date_points(
+                cy_start, self.current_year, self.current_month,
+                config.hours_per_point,
+            )
+
+            # This month's budget + rolled over from previous months
+            month_budget = storage.get_monthly_point_budget(
+                self.current_year, self.current_month,
+            ) or 0
+
+            # Rolled over = cumulative budget up to prev month - billed up to prev month
+            rolled_over = 0
+            prev_m = self.current_month - 1
+            prev_y = self.current_year
+            if prev_m < 1:
+                prev_m = 12
+                prev_y -= 1
+            if (prev_y, prev_m) >= (cy_start.year, cy_start.month):
+                budget_to_prev = storage.get_cumulative_point_budget(
+                    cy_start, prev_y, prev_m,
+                )
+                billed_to_prev = int(storage.get_year_to_date_points(
+                    cy_start, prev_y, prev_m, config.hours_per_point,
+                ))
+                rolled_over = max(0, budget_to_prev - billed_to_prev)
+
+            total_available = month_budget + rolled_over
+
+            # Always show points info
+            budget_str = f"{month_budget}"
+            if rolled_over > 0:
+                budget_str += f"+{rolled_over} rolled over"
+            budget_str += f"={total_available} available"
+
+            earnings_text.append(
+                f"              Contract year: {int(ytd_pts)} pts billed"
+                f"  |  This month: {budget_str}\n",
+            )
+            earnings_text.append(
+                "              This month: ",
+            )
+            earnings_text.append(f"{billable_pts} pts billable", style="bold green")
+            if speculative_pts > 0:
+                earnings_text.append("  +  ")
+                earnings_text.append(f"{speculative_pts} pts speculative", style="dim")
+
+            # Financial details only when $ toggled
+            if self.show_money:
+                bill_ex = billable_pts * config.point_rate
+                bill_inc = bill_ex * (1 + config.vat_rate)
+                earnings_text.append(
+                    f"\n              Billable: £{float(bill_ex):,.2f}"
+                    f" ex VAT  (£{float(bill_inc):,.2f} inc VAT)",
+                )
+                if speculative_pts > 0:
+                    spec_ex = speculative_pts * config.point_rate
+                    spec_inc = spec_ex * (1 + config.vat_rate)
+                    earnings_text.append(
+                        f"\n              Speculative: £{float(spec_ex):,.2f}"
+                        f" ex VAT  (£{float(spec_inc):,.2f} inc VAT)",
+                    )
+
             month_earnings.update(earnings_text)
         else:
             month_earnings.add_class("hidden")
@@ -1004,10 +1095,23 @@ class TimesheetApp(App):
             ]
 
             if self.show_money:
-                billable = totals['worked'] * config.hourly_rate
+                month_start = date(year, month, 1)
+                if config.contract_start and month_start >= config.contract_start:
+                    # Points-based billing
+                    b_pts, _ = storage.get_monthly_points_breakdown(
+                        year, month, config.hours_per_point,
+                    )
+                    billable = Decimal(b_pts) * config.point_rate
+                else:
+                    # Hourly billing
+                    billable = totals['worked'] * config.hourly_rate
                 with_vat = billable * (1 + config.vat_rate)
-                row_data.append(Text(f"£{float(billable):,.0f}" if billable else "-", style=style))
-                row_data.append(Text(f"£{float(with_vat):,.0f}" if with_vat else "-", style=style))
+                row_data.append(Text(
+                    f"£{float(billable):,.0f}" if billable else "-", style=style,
+                ))
+                row_data.append(Text(
+                    f"£{float(with_vat):,.0f}" if with_vat else "-", style=style,
+                ))
 
             table.add_row(*row_data, key=f"{year}-{month:02d}")
 
@@ -1065,16 +1169,58 @@ class TimesheetApp(App):
 
         year_summary.update(text)
 
-        # Update earnings display (between table and summary)
+        # Update points/earnings display
         year_earnings = self.query_one("#year-earnings", Static)
-        if self.show_money:
+        if config.contract_start:
             year_earnings.remove_class("hidden")
-            year_billable = year_worked * config.hourly_rate
-            year_with_vat = year_billable * (1 + config.vat_rate)
-            amount_str = f"£{float(year_billable):,.2f}"
-            vat_str = f"£{float(year_with_vat):,.2f}"
             earnings_text = Text()
-            earnings_text.append(f"                                           Billable  {amount_str:>10}   ({vat_str} inc VAT)")
+
+            # Sum billable and speculative points across the company year
+            year_billable_pts = 0
+            year_speculative_pts = 0
+            for y, m in months:
+                b, s = storage.get_monthly_points_breakdown(
+                    y, m, config.hours_per_point,
+                )
+                year_billable_pts += b
+                year_speculative_pts += s
+
+            # YTD against annual max
+            cy_start = config.contract_start
+            ytd_pts = storage.get_year_to_date_points(
+                cy_start, self.current_year, self.current_month,
+                config.hours_per_point,
+            )
+            annual_remaining = config.annual_max_points - int(ytd_pts)
+
+            earnings_text.append(
+                f"              Year-to-date: {int(ytd_pts)} pts billed"
+                f"  |  Annual max: {config.annual_max_points} pts"
+                f"  |  Remaining: {annual_remaining} pts\n",
+            )
+            earnings_text.append(
+                "              Year total: ",
+            )
+            earnings_text.append(f"{year_billable_pts} pts billable", style="bold green")
+            if year_speculative_pts > 0:
+                earnings_text.append("  +  ")
+                earnings_text.append(f"{year_speculative_pts} pts speculative", style="dim")
+
+            if self.show_money:
+                bill_ex = year_billable_pts * config.point_rate
+                bill_inc = bill_ex * (1 + config.vat_rate)
+                earnings_text.append(
+                    f"\n              Billable: £{float(bill_ex):,.2f}"
+                    f" ex VAT  (£{float(bill_inc):,.2f} inc VAT)",
+                )
+                if year_speculative_pts > 0:
+                    spec_ex = year_speculative_pts * config.point_rate
+                    spec_inc = spec_ex * (1 + config.vat_rate)
+                    earnings_text.append(
+                        f"\n              Speculative: £{float(spec_ex):,.2f}"
+                        f" ex VAT  (£{float(spec_inc):,.2f} inc VAT)",
+                    )
+
             year_earnings.update(earnings_text)
         else:
             year_earnings.add_class("hidden")
@@ -1615,7 +1761,7 @@ class TimesheetApp(App):
         elif action == "edit_day":
             return mode in ("week", "day") or False
         elif action == "toggle_money":
-            return mode in ("week", "month", "year") or False
+            return mode in ("month", "year") or False
 
         # Year view only
         elif action == "populate_holidays":

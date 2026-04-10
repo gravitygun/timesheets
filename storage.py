@@ -1114,3 +1114,63 @@ def get_year_to_date_points(
     conn.close()
     total_hours = Decimal(str(row["total"])).quantize(Decimal("0.01"))
     return (total_hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING)
+
+
+def get_monthly_points_breakdown(
+    year: int,
+    month: int,
+    hours_per_point: Decimal,
+) -> tuple[int, int]:
+    """Get billable and speculative points for a single month.
+
+    Billable = archived tickets, speculative = non-archived.
+    Returns (billable_points, speculative_points).
+    """
+    from calendar import monthrange
+
+    start = date(year, month, 1)
+    end = date(year, month, monthrange(year, month)[1])
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT t.archived, ta.ticket_id,
+               SUM(CAST(ta.hours AS REAL)) as total
+        FROM ticket_allocations ta
+        JOIN tickets t ON ta.ticket_id = t.id
+        WHERE ta.date >= ? AND ta.date <= ?
+        GROUP BY ta.ticket_id, t.archived
+        """,
+        (start.isoformat(), end.isoformat()),
+    ).fetchall()
+    conn.close()
+
+    billable = 0
+    speculative = 0
+    for row in rows:
+        hours = Decimal(str(row["total"]))
+        pts = int((hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING))
+        if row["archived"]:
+            billable += pts
+        else:
+            speculative += pts
+    return billable, speculative
+
+
+def get_cumulative_point_budget(
+    contract_start: date,
+    up_to_year: int,
+    up_to_month: int,
+) -> int:
+    """Sum monthly point budgets from contract_start month to up_to month inclusive."""
+    total = 0
+    y, m = contract_start.year, contract_start.month
+    while (y, m) <= (up_to_year, up_to_month):
+        budget = get_monthly_point_budget(y, m)
+        if budget:
+            total += budget
+        if m == 12:
+            y += 1
+            m = 1
+        else:
+            m += 1
+    return total
