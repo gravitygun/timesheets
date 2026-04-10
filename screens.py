@@ -659,7 +659,7 @@ class TicketManagementScreen(ModalScreen[None]):
         Binding("escape", "close", "Dismiss"),
         Binding("n", "new_ticket", "New"),
         Binding("e", "edit_ticket", "Edit"),
-        Binding("a", "toggle_archive", "Close Ticket"),
+        Binding("a", "toggle_archive", "Close/Reopen"),
         Binding("p", "toggle_points_entered", "Pts Entered"),
         Binding("d", "delete_ticket", "Delete"),
     ]
@@ -681,7 +681,7 @@ class TicketManagementScreen(ModalScreen[None]):
             with Horizontal(id="tickets-footer"):
                 yield Button("New [n]", id="btn-new")
                 yield Button("Edit [e]", id="btn-edit")
-                yield Button("Close Ticket [a]", id="btn-archive")
+                yield Button("Close/Reopen [a]", id="btn-archive")
                 yield Button("Pts Entered [p]", id="btn-pts-entered")
                 yield Button("Delete [d]", id="btn-delete")
                 yield Button("Dismiss [Esc]", id="btn-close")
