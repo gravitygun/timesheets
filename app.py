@@ -1935,7 +1935,23 @@ class TimesheetApp(App):
 
     def action_manage_tickets(self):
         """Open ticket management screen."""
-        self.push_screen(TicketManagementScreen())
+        ticket_id = self._get_focused_ticket_id()
+        self.push_screen(TicketManagementScreen(select_ticket_id=ticket_id))
+
+    def _get_focused_ticket_id(self) -> str | None:
+        """Get the ticket ID from the currently focused row, if any."""
+        if self.view_mode == "day":
+            table = self.query_one("#day-table", DataTable)
+            if table.row_count == 0:
+                return None
+            row_key = table.coordinate_to_cell_key(
+                Coordinate(table.cursor_row, 0),
+            ).row_key
+            return str(row_key.value) if row_key else None
+        if self.view_mode == "allocations":
+            ticket_id, _ = self._get_alloc_cell_info()
+            return ticket_id
+        return None
 
     def action_manage_deliverables(self):
         """Open deliverable management screen."""

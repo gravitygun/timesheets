@@ -664,9 +664,10 @@ class TicketManagementScreen(ModalScreen[None]):
         Binding("d", "delete_ticket", "Delete"),
     ]
 
-    def __init__(self):
+    def __init__(self, select_ticket_id: str | None = None):
         super().__init__()
         self.show_archived = False
+        self._select_ticket_id = select_ticket_id
 
     def compose(self) -> ComposeResult:
         with Vertical(id="tickets-dialog"):
@@ -696,7 +697,11 @@ class TicketManagementScreen(ModalScreen[None]):
         table.add_column("Status", width=10)
         table.add_column("Pts", width=4)
         self._refresh_table()
-        self.query_one("#tickets-search", Input).focus()
+        if self._select_ticket_id:
+            self._move_cursor_to_ticket(self._select_ticket_id)
+            self.query_one("#tickets-table", DataTable).focus()
+        else:
+            self.query_one("#tickets-search", Input).focus()
 
     def _refresh_table(self, search: str = "") -> None:
         """Refresh the ticket table."""
@@ -720,6 +725,14 @@ class TicketManagementScreen(ModalScreen[None]):
                 pts_entered,
                 key=ticket.id,
             )
+
+    def _move_cursor_to_ticket(self, ticket_id: str) -> None:
+        """Move the table cursor to the row matching the given ticket ID."""
+        table = self.query_one("#tickets-table", DataTable)
+        for idx, row_key in enumerate(table.rows):
+            if str(row_key.value) == ticket_id:
+                table.move_cursor(row=idx)
+                return
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """Filter tickets as user types."""
