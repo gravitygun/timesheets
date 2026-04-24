@@ -38,6 +38,8 @@ def get_connection() -> sqlite3.Connection:
 def init_db():
     """Create tables if they don't exist."""
     conn = get_connection()
+    # WAL mode lets the HTTP API read concurrently while the TUI is open.
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS time_entries (
             date TEXT PRIMARY KEY,
