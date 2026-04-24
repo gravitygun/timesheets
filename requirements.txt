@@ -1,3 +1,5 @@
 openpyxl>=3.1.0
 textual>=0.47.0
 holidays>=0.40
+fastapi>=0.110
+uvicorn[standard]>=0.27
