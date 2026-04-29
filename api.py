@@ -20,7 +20,7 @@ from fastapi import Body, FastAPI, HTTPException, Path, Query
 from pydantic import BaseModel, Field, PlainSerializer
 
 import storage
-from models import Ticket, TicketAllocation
+from models import Deliverable, Ticket, TicketAllocation
 
 
 # --- Serialisation helpers -------------------------------------------------
@@ -62,11 +62,20 @@ class TicketOut(BaseModel):
     description: str
     archived: bool
     created_at: date | None
+    deliverable_id: str | None
 
 
 class TicketIn(BaseModel):
     id: str = Field(min_length=1, max_length=8)
     description: str = Field(min_length=1)
+    deliverable_id: str | None = None
+
+
+class DeliverableOut(BaseModel):
+    id: str
+    work_package_id: str
+    title: str
+    active: bool
 
 
 class AllocationOut(BaseModel):
@@ -93,6 +102,16 @@ def _ticket_to_out(t: Ticket) -> TicketOut:
         description=t.description,
         archived=t.archived,
         created_at=t.created_at,
+        deliverable_id=t.deliverable_id,
+    )
+
+
+def _deliverable_to_out(d: Deliverable) -> DeliverableOut:
+    return DeliverableOut(
+        id=d.id,
+        work_package_id=d.work_package_id,
+        title=d.title,
+        active=d.active,
     )
 
 
@@ -188,7 +207,19 @@ def get_ticket(ticket_id: str) -> TicketOut:
 def create_ticket(payload: Annotated[TicketIn, Body()]) -> TicketOut:
     if storage.get_ticket(payload.id) is not None:
         raise HTTPException(status_code=409, detail=f"ticket {payload.id!r} already exists")
-    storage.save_ticket(Ticket(id=payload.id, description=payload.description))
+    if payload.deliverable_id is not None:
+        if storage.get_deliverable(payload.deliverable_id) is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"deliverable {payload.deliverable_id!r} not found",
+            )
+    storage.save_ticket(
+        Ticket(
+            id=payload.id,
+            description=payload.description,
+            deliverable_id=payload.deliverable_id,
+        )
+    )
     created = storage.get_ticket(payload.id)
     assert created is not None
     return _ticket_to_out(created)
@@ -212,6 +243,14 @@ def unarchive_ticket(ticket_id: str) -> TicketOut:
     updated = storage.get_ticket(ticket_id)
     assert updated is not None
     return _ticket_to_out(updated)
+
+
+# --- Deliverables ----------------------------------------------------------
+
+
+@app.get("/deliverables", response_model=list[DeliverableOut])
+def list_deliverables(active_only: bool = True) -> list[DeliverableOut]:
+    return [_deliverable_to_out(d) for d in storage.get_all_deliverables(active_only=active_only)]
 
 
 # --- Allocations -----------------------------------------------------------

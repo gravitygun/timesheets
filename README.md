@@ -203,8 +203,9 @@ Endpoints (auto-generated docs at <http://127.0.0.1:8765/docs>):
 | GET    | `/health`                             | Liveness + reports the active database path              |
 | GET    | `/entries/{date}`                     | Attendance + worked/allocated/gap hours for a day        |
 | GET    | `/tickets?q=&include_archived=`       | List/search tickets                                      |
-| GET    | `/tickets/{id}`                       | Fetch a ticket                                           |
-| POST   | `/tickets`                            | Create a ticket (`{id, description}`)                    |
+| GET    | `/tickets/{id}`                       | Fetch a ticket (includes `deliverable_id`)               |
+| POST   | `/tickets`                            | Create a ticket (`{id, description, deliverable_id?}`)   |
+| GET    | `/deliverables?active_only=`          | List deliverables (defaults to active only)              |
 | POST   | `/tickets/{id}/archive`               | Close                                                    |
 | POST   | `/tickets/{id}/unarchive`             | Reopen                                                   |
 | GET    | `/allocations/{date}`                 | Allocations for a day                                    |
@@ -214,9 +215,11 @@ Endpoints (auto-generated docs at <http://127.0.0.1:8765/docs>):
 <!-- markdownlint-enable MD013 -->
 
 Hours are sent and received as decimal-shaped strings (e.g. `"3.50"`) to
-avoid float drift. Allocation `description` may be multi-line. The API
-deliberately does not expose config, work packages, deliverables, billing,
-or ticket rename/delete - the TUI keeps full control of those.
+avoid float drift. Allocation `description` may be multi-line. Deliverables
+are exposed read-only and can be set on a ticket at create time so external
+automation (e.g. record-my-time) can keep billing tidy. The API
+deliberately does not expose config, work packages, billing, or ticket
+rename/delete - the TUI keeps full control of those.
 
 ## Multi-Machine Setup
 

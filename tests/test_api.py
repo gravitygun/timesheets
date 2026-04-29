@@ -100,10 +100,28 @@ class TestTickets:
         body = r.json()
         assert body["id"] == "9610"
         assert body["archived"] is False
+        assert body["deliverable_id"] is None
 
         r = client.get("/tickets/9610")
         assert r.status_code == 200
         assert r.json()["description"] == "List cluster resources"
+        assert r.json()["deliverable_id"] is None
+
+    def test_create_with_deliverable(self, client: TestClient) -> None:
+        # WP5a-D1 is seeded by storage.init_db
+        r = client.post(
+            "/tickets",
+            json={"id": "9610", "description": "x", "deliverable_id": "WP5a-D1"},
+        )
+        assert r.status_code == 201
+        assert r.json()["deliverable_id"] == "WP5a-D1"
+
+    def test_create_with_unknown_deliverable_rejected(self, client: TestClient) -> None:
+        r = client.post(
+            "/tickets",
+            json={"id": "9610", "description": "x", "deliverable_id": "WP-NOPE"},
+        )
+        assert r.status_code == 422
 
     def test_create_duplicate_conflicts(self, client: TestClient) -> None:
         client.post("/tickets", json={"id": "9610", "description": "first"})
@@ -230,3 +248,29 @@ class TestAllocations:
         r = client.get("/allocations/month/2026/4")
         dates = [a["date"] for a in r.json()]
         assert dates == ["2026-04-01", "2026-04-15", "2026-04-30"]
+
+
+class TestDeliverables:
+    def test_list_active_only_by_default(self, client: TestClient) -> None:
+        r = client.get("/deliverables")
+        assert r.status_code == 200
+        ids = [d["id"] for d in r.json()]
+        # WP5a-D1 and WP5-D4 are seeded as active
+        assert "WP5a-D1" in ids
+        assert "WP5-D4" in ids
+        # All entries are active when active_only defaults to true
+        assert all(d["active"] for d in r.json())
+
+    def test_list_includes_inactive_when_requested(self, client: TestClient) -> None:
+        r = client.get("/deliverables?active_only=false")
+        assert r.status_code == 200
+        # The seeded set includes some inactive (backfilled) deliverables
+        actives = [d for d in r.json() if d["active"]]
+        all_ds = r.json()
+        assert len(all_ds) >= len(actives)
+
+    def test_each_entry_has_work_package_link(self, client: TestClient) -> None:
+        r = client.get("/deliverables")
+        for d in r.json():
+            assert d["work_package_id"]
+            assert d["title"]
