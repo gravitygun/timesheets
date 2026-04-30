@@ -179,6 +179,48 @@ for the period.
 - Earnings are hidden by default (toggle with `$`)
 - Standard working day is 7.5 hours
 
+## HTTP API
+
+A small read/write HTTP API is shipped alongside the TUI for automating
+allocation entry from external tools (e.g. an AI assistant on a remote dev
+machine, reached over an SSH `RemoteForward`).
+
+Start it with:
+
+```bash
+./run_api.sh
+```
+
+By default it binds `127.0.0.1:8765`. Override with `TIMESHEETS_API_HOST` /
+`TIMESHEETS_API_PORT`. The TUI can stay open while the API is running -
+SQLite is opened in WAL mode so reads and writes don't fight.
+
+Endpoints (auto-generated docs at <http://127.0.0.1:8765/docs>):
+
+<!-- markdownlint-disable MD013 -->
+| Method | Path                                  | Purpose                                                  |
+| ------ | ------------------------------------- | -------------------------------------------------------- |
+| GET    | `/health`                             | Liveness + reports the active database path              |
+| GET    | `/entries/{date}`                     | Attendance + worked/allocated/gap hours for a day        |
+| GET    | `/tickets?q=&include_archived=`       | List/search tickets                                      |
+| GET    | `/tickets/{id}`                       | Fetch a ticket (includes `deliverable_id`)               |
+| POST   | `/tickets`                            | Create a ticket (`{id, description, deliverable_id?}`)   |
+| GET    | `/deliverables?active_only=`          | List deliverables (defaults to active only)              |
+| POST   | `/tickets/{id}/archive`               | Close                                                    |
+| POST   | `/tickets/{id}/unarchive`             | Reopen                                                   |
+| GET    | `/allocations/{date}`                 | Allocations for a day                                    |
+| GET    | `/allocations/month/{year}/{month}`   | Allocations for a calendar month                         |
+| POST   | `/allocations`                        | Upsert `{ticket_id, date, hours, description?}`          |
+| DELETE | `/allocations/{ticket_id}/{date}`     | Remove a single allocation                               |
+<!-- markdownlint-enable MD013 -->
+
+Hours are sent and received as decimal-shaped strings (e.g. `"3.50"`) to
+avoid float drift. Allocation `description` may be multi-line. Deliverables
+are exposed read-only and can be set on a ticket at create time so external
+automation (e.g. record-my-time) can keep billing tidy. The API
+deliberately does not expose config, work packages, billing, or ticket
+rename/delete - the TUI keeps full control of those.
+
 ## Multi-Machine Setup
 
 The app supports syncing via cloud storage (iCloud, Dropbox, etc.) using the
