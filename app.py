@@ -22,6 +22,7 @@ from screens import (
     EditAllocationScreen,
     EditDayScreen,
     ExportAllocationsScreen,
+    FinaliseBillScreen,
     MoveAllocationScreen,
     TicketManagementScreen,
     TicketSelectScreen,
@@ -876,15 +877,19 @@ class TimesheetApp(App):
             earnings_text = Text()
 
             # Points breakdown for this month
-            billable_pts, speculative_pts = storage.get_monthly_points_breakdown(
-                self.current_year, self.current_month, config.hours_per_point,
+            billed_pts, billable_pts, speculative_pts = (
+                storage.get_monthly_points_breakdown(
+                    self.current_year, self.current_month, config.hours_per_point,
+                )
             )
 
             # Contract year runs Apr-Mar
             cy_start = config.contract_start
-            ytd_pts = storage.get_year_to_date_points(
-                cy_start, self.current_year, self.current_month,
+            ytd_pts = storage.get_billed_points_total(
                 config.hours_per_point,
+                up_to_year=self.current_year,
+                up_to_month=self.current_month,
+                contract_start=cy_start,
             )
 
             # This month's budget + rolled over from previous months
@@ -903,8 +908,10 @@ class TimesheetApp(App):
                 budget_to_prev = storage.get_cumulative_point_budget(
                     cy_start, prev_y, prev_m,
                 )
-                billed_to_prev = int(storage.get_year_to_date_points(
-                    cy_start, prev_y, prev_m, config.hours_per_point,
+                billed_to_prev = int(storage.get_billed_points_total(
+                    config.hours_per_point,
+                    up_to_year=prev_y, up_to_month=prev_m,
+                    contract_start=cy_start,
                 ))
                 rolled_over = max(0, budget_to_prev - billed_to_prev)
 
@@ -923,19 +930,32 @@ class TimesheetApp(App):
             earnings_text.append(
                 "              This month: ",
             )
-            earnings_text.append(f"{billable_pts} pts billable", style="bold green")
+            earnings_text.append(f"{billed_pts} pts billed", style="bold green")
+            if billable_pts > 0:
+                earnings_text.append("  +  ")
+                earnings_text.append(
+                    f"{billable_pts} pts billable", style="bold yellow",
+                )
             if speculative_pts > 0:
                 earnings_text.append("  +  ")
                 earnings_text.append(f"{speculative_pts} pts speculative", style="dim")
 
             # Financial details only when $ toggled
             if self.show_money:
-                bill_ex = billable_pts * config.point_rate
-                bill_inc = bill_ex * (1 + config.vat_rate)
-                earnings_text.append(
-                    f"\n              Billable: £{float(bill_ex):,.2f}"
-                    f" ex VAT  (£{float(bill_inc):,.2f} inc VAT)",
-                )
+                if billed_pts > 0:
+                    billed_ex = billed_pts * config.point_rate
+                    billed_inc = billed_ex * (1 + config.vat_rate)
+                    earnings_text.append(
+                        f"\n              Billed: £{float(billed_ex):,.2f}"
+                        f" ex VAT  (£{float(billed_inc):,.2f} inc VAT)",
+                    )
+                if billable_pts > 0:
+                    bill_ex = billable_pts * config.point_rate
+                    bill_inc = bill_ex * (1 + config.vat_rate)
+                    earnings_text.append(
+                        f"\n              Billable: £{float(bill_ex):,.2f}"
+                        f" ex VAT  (£{float(bill_inc):,.2f} inc VAT)",
+                    )
                 if speculative_pts > 0:
                     spec_ex = speculative_pts * config.point_rate
                     spec_inc = spec_ex * (1 + config.vat_rate)
@@ -1097,11 +1117,11 @@ class TimesheetApp(App):
             if self.show_money:
                 month_start = date(year, month, 1)
                 if config.contract_start and month_start >= config.contract_start:
-                    # Points-based billing
-                    b_pts, _ = storage.get_monthly_points_breakdown(
+                    # Points-based billing: billed + billable (closed) earns points
+                    billed_p, billable_p, _ = storage.get_monthly_points_breakdown(
                         year, month, config.hours_per_point,
                     )
-                    billable = Decimal(b_pts) * config.point_rate
+                    billable = Decimal(billed_p + billable_p) * config.point_rate
                 else:
                     # Hourly billing
                     billable = totals['worked'] * config.hourly_rate
@@ -1175,21 +1195,24 @@ class TimesheetApp(App):
             year_earnings.remove_class("hidden")
             earnings_text = Text()
 
-            # Sum billable and speculative points across the company year
+            # Sum billed/billable/speculative points across the company year
+            year_billed_pts = 0
             year_billable_pts = 0
             year_speculative_pts = 0
             for y, m in months:
-                b, s = storage.get_monthly_points_breakdown(
+                bd, b, s = storage.get_monthly_points_breakdown(
                     y, m, config.hours_per_point,
                 )
+                year_billed_pts += bd
                 year_billable_pts += b
                 year_speculative_pts += s
 
-            # YTD against annual max
-            cy_start = config.contract_start
-            ytd_pts = storage.get_year_to_date_points(
-                cy_start, self.current_year, self.current_month,
+            # YTD against annual max (true billed only)
+            ytd_pts = storage.get_billed_points_total(
                 config.hours_per_point,
+                up_to_year=self.current_year,
+                up_to_month=self.current_month,
+                contract_start=config.contract_start,
             )
             annual_remaining = config.annual_max_points - int(ytd_pts)
 
@@ -1201,18 +1224,31 @@ class TimesheetApp(App):
             earnings_text.append(
                 "              Year total: ",
             )
-            earnings_text.append(f"{year_billable_pts} pts billable", style="bold green")
+            earnings_text.append(f"{year_billed_pts} pts billed", style="bold green")
+            if year_billable_pts > 0:
+                earnings_text.append("  +  ")
+                earnings_text.append(
+                    f"{year_billable_pts} pts billable", style="bold yellow",
+                )
             if year_speculative_pts > 0:
                 earnings_text.append("  +  ")
                 earnings_text.append(f"{year_speculative_pts} pts speculative", style="dim")
 
             if self.show_money:
-                bill_ex = year_billable_pts * config.point_rate
-                bill_inc = bill_ex * (1 + config.vat_rate)
-                earnings_text.append(
-                    f"\n              Billable: £{float(bill_ex):,.2f}"
-                    f" ex VAT  (£{float(bill_inc):,.2f} inc VAT)",
-                )
+                if year_billed_pts > 0:
+                    billed_ex = year_billed_pts * config.point_rate
+                    billed_inc = billed_ex * (1 + config.vat_rate)
+                    earnings_text.append(
+                        f"\n              Billed: £{float(billed_ex):,.2f}"
+                        f" ex VAT  (£{float(billed_inc):,.2f} inc VAT)",
+                    )
+                if year_billable_pts > 0:
+                    bill_ex = year_billable_pts * config.point_rate
+                    bill_inc = bill_ex * (1 + config.vat_rate)
+                    earnings_text.append(
+                        f"\n              Billable: £{float(bill_ex):,.2f}"
+                        f" ex VAT  (£{float(bill_inc):,.2f} inc VAT)",
+                    )
                 if year_speculative_pts > 0:
                     spec_ex = year_speculative_pts * config.point_rate
                     spec_inc = spec_ex * (1 + config.vat_rate)
@@ -1390,9 +1426,10 @@ class TimesheetApp(App):
                 config.points_start_date, ticket_ids=ticket_ids,
             )
 
-        # Calculate optimal ticket column width (min 6, max 10)
-        max_ticket_len = max((len(tid) for tid in ticket_ids), default=6)
-        ticket_col_width = min(max(max_ticket_len, 6), 10)
+        # Calculate optimal ticket column width (min 6, max 10).
+        # +2 for the closed-marker prefix ("✓ " or "  ").
+        max_ticket_len = max((len(tid) for tid in ticket_ids), default=6) + 2
+        ticket_col_width = min(max(max_ticket_len, 8), 12)
 
         # Determine which days to show (exclude weekends unless they have worked hours)
         days_to_show: list[int] = []
@@ -1438,7 +1475,10 @@ class TimesheetApp(App):
         for ticket_id in ticket_ids:
             ticket = all_tickets.get(ticket_id)
             desc = ticket.description[:18] if ticket else ""
-            row_data: list[str | Text] = [ticket_id, desc]
+            # Closed tickets get a leading green ✓; the marker carries the
+            # meaning even if Textual's row cursor strips the colour.
+            id_cell = self._ticket_id_cell(ticket_id)
+            row_data: list[str | Text] = [id_cell, desc]
             row_total = Decimal("0")
             row_entered = Decimal("0")
 
@@ -1500,6 +1540,57 @@ class TimesheetApp(App):
                     pts_cell = Text("-", style="dim")
                 row_data.append(pts_cell)
             table.add_row(*row_data, key=ticket_id)
+
+        # Add carryover rows: tickets with prior-month allocations that
+        # haven't been billed yet. Lets the user see what still needs
+        # closing/billing without those tickets cluttering the active rows.
+        carryover = storage.get_carryover_tickets(
+            self.current_year, self.current_month,
+            contract_start=config.contract_start,
+        )
+        if carryover:
+            divider_row: list[str | Text] = [
+                Text("─" * 6, style="dim"),
+                Text("── carryover (unbilled prior work) ──", style="dim italic"),
+            ]
+            for day in days_to_show:
+                d = date(self.current_year, self.current_month, day)
+                is_friday = day in friday_days
+                cell = Text()
+                cell.append("     ", style="dim")
+                if is_friday:
+                    cell.append("│", style="dim")
+                divider_row.append(cell)
+            divider_row.append(Text("│", style="dim"))
+            divider_row.append(Text("│", style="dim"))
+            if show_points:
+                divider_row.append(Text(""))
+            table.add_row(*divider_row, key="__carryover_divider__")
+
+            for co_ticket, co_hours in carryover:
+                co_row: list[str | Text] = [
+                    Text(co_ticket.id, style="dim"),
+                    Text(co_ticket.description[:18], style="dim"),
+                ]
+                for day in days_to_show:
+                    is_friday = day in friday_days
+                    cell = Text()
+                    cell.append("    -", style="dim")
+                    if is_friday:
+                        cell.append("│", style="dim")
+                    co_row.append(cell)
+                alloc_cell = Text()
+                alloc_cell.append("│", style="dim")
+                alloc_cell.append(f"{float(co_hours):>5g}", style="dim")
+                co_row.append(alloc_cell)
+                entered_cell = Text()
+                entered_cell.append("│", style="dim")
+                entered_cell.append("     -", style="dim")
+                co_row.append(entered_cell)
+                if show_points:
+                    co_pts = calculate_points(co_hours, config.hours_per_point)
+                    co_row.append(Text(str(co_pts) if co_pts else "-", style="dim"))
+                table.add_row(*co_row, key=f"__co_{co_ticket.id}")
 
         # Add summary rows: Worked, Status, and Week Total
         worked_row: list[str | Text] = ["Worked", ""]
@@ -1755,7 +1846,7 @@ class TimesheetApp(App):
         elif action == "goto_today":
             return mode in ("week", "month") or False
         elif action in ("alloc_prev_month", "alloc_next_month"):
-            return mode in ("allocations", "billing") or False
+            return mode == "allocations" or False
 
         # Week/day view
         elif action == "edit_day":
@@ -2513,16 +2604,33 @@ class TimesheetApp(App):
         else:
             alloc_desc.clear_display()
 
+    def _ticket_id_cell(self, ticket_id: str) -> str | Text:
+        """Build the ticket ID cell content, with closed-ticket styling."""
+        ticket = storage.get_ticket(ticket_id)
+        if ticket and ticket.archived:
+            return Text.assemble(
+                ("✓ ", "bold green"),
+                (ticket_id, "bold green"),
+            )
+        return "  " + ticket_id
+
     def _highlight_ticket_cell(self, table: DataTable, ticket_id: str) -> None:
         """Highlight the ticket ID cell with reverse video style."""
         first_col_key = list(table.columns.keys())[0]
-        table.update_cell(ticket_id, first_col_key, Text(ticket_id, style="reverse"))
+        ticket = storage.get_ticket(ticket_id)
+        prefix = "✓ " if ticket and ticket.archived else "  "
+        table.update_cell(
+            ticket_id, first_col_key,
+            Text(prefix + ticket_id, style="reverse"),
+        )
 
     def _restore_ticket_cell(self, table: DataTable, ticket_id: str) -> None:
-        """Restore the ticket ID cell to normal style."""
+        """Restore the ticket ID cell to its original style."""
         first_col_key = list(table.columns.keys())[0]
         try:
-            table.update_cell(ticket_id, first_col_key, ticket_id)
+            table.update_cell(
+                ticket_id, first_col_key, self._ticket_id_cell(ticket_id),
+            )
         except Exception:
             pass  # Row may no longer exist
 
@@ -2894,6 +3002,8 @@ class TimesheetApp(App):
 
     def action_alloc_prev_month(self) -> None:
         """Navigate to the previous month in allocations view."""
+        if self.view_mode == "billing":
+            return
         if self.current_month == 1:
             self.current_year -= 1
             self.current_month = 12
@@ -2905,6 +3015,8 @@ class TimesheetApp(App):
 
     def action_alloc_next_month(self) -> None:
         """Navigate to the next month in allocations view."""
+        if self.view_mode == "billing":
+            return
         if self.current_month == 12:
             self.current_year += 1
             self.current_month = 1
@@ -2938,28 +3050,15 @@ class TimesheetApp(App):
         table.add_column("Inc VAT", width=12, key="inc_vat")
 
     def _refresh_billing_display(self):
-        """Refresh the billing view."""
+        """Refresh the billing view (point-in-time current bill)."""
         config = storage.get_config()
-        month_name = date(self.current_year, self.current_month, 1).strftime("%B %Y")
 
-        # Get billing data
-        billing = storage.get_monthly_billing(self.current_year, self.current_month)
-        budget = storage.get_monthly_point_budget(
-            self.current_year, self.current_month,
-        )
-
-        lines = storage.get_billing_summary_for_month(
-            self.current_year,
-            self.current_month,
+        lines = storage.get_current_bill_summary(
             hours_per_point=config.hours_per_point,
             point_rate=config.point_rate,
             vat_rate=config.vat_rate,
+            contract_start=config.contract_start,
         )
-
-        # Update header
-        status = " [FINALISED]" if billing.finalised else ""
-        header = self.query_one("#billing-header", Static)
-        header.update(f"  BILLING: {month_name}{status}  [◄ ] / [ ►]")
 
         # Populate table
         table = self.query_one("#billing-table", DataTable)
@@ -2998,64 +3097,90 @@ class TimesheetApp(App):
                 key="__total__",
             )
 
-        # Build summary
-        budget_str = f"{budget} pts" if budget else "N/A"
-        remaining = Decimal(str(budget)) - total_points if budget else Decimal("0")
+        # Update header
+        billable_tickets = storage.get_billable_tickets(
+            contract_start=config.contract_start,
+        )
+        ticket_count = len(billable_tickets)
+        header = self.query_one("#billing-header", Static)
+        header.update(
+            f"  CURRENT BILL  ({ticket_count} ticket(s), "
+            f"{int(total_points)} pts, £{total_inc:,.2f} inc VAT)",
+        )
 
-        # Year-to-date
-        ytd_points = Decimal("0")
-        if config.contract_start:
-            ytd_points = storage.get_year_to_date_points(
-                config.contract_start,
-                self.current_year,
-                self.current_month,
-                config.hours_per_point,
-            )
-
-        annual_remaining = Decimal(str(config.annual_max_points)) - ytd_points
+        # Annual cap calculation against billed-to-date
+        billed_ytd = storage.get_billed_points_total(
+            config.hours_per_point, contract_start=config.contract_start,
+        )
+        after_finalising = billed_ytd + total_points
+        annual_remaining = Decimal(str(config.annual_max_points)) - after_finalising
 
         summary_parts = [
-            f"Month: {total_points} pts / {budget_str} budget"
-            f" ({remaining} remaining)",
-            f"Year-to-date: {ytd_points} pts / {config.annual_max_points} annual max"
-            f" ({annual_remaining} remaining)",
+            f"Billed YTD: {int(billed_ytd)} pts  |  "
+            f"This bill: {int(total_points)} pts  |  "
+            f"After finalising: {int(after_finalising)} / "
+            f"{config.annual_max_points} pts "
+            f"({int(annual_remaining)} remaining)",
             f"Rate: £{config.point_rate}/pt (1 pt = {config.hours_per_point}h)"
             f"  |  VAT: {config.vat_rate * 100:.0f}%",
         ]
-        if billing.finalised:
-            summary_parts.append("Status: FINALISED")
-        else:
-            summary_parts.append("Press [bold]f[/bold] to finalise this month")
 
-        # Check for unlinked allocations
+        # Warn about unlinked allocations
         unlinked = [ln for ln in lines if ln.deliverable_id is None]
         if unlinked:
             summary_parts.append(
-                f"WARNING: {unlinked[0].hours}h on tickets with no deliverable assigned"
+                f"WARNING: {unlinked[0].hours}h on tickets with no deliverable assigned",
             )
+
+        if ticket_count > 0:
+            summary_parts.append("Press [bold]f[/bold] to finalise this bill")
+        else:
+            summary_parts.append("Nothing to bill right now")
 
         self.query_one("#billing-summary", Static).update("\n".join(summary_parts))
 
     def action_finalise_billing(self) -> None:
-        """Toggle finalisation of the current month's billing."""
+        """Open the finalise-bill modal to commit the current bill."""
         if self.view_mode != "billing":
             return
 
-        billing = storage.get_monthly_billing(
-            self.current_year, self.current_month,
+        config = storage.get_config()
+        lines = storage.get_current_bill_summary(
+            hours_per_point=config.hours_per_point,
+            point_rate=config.point_rate,
+            vat_rate=config.vat_rate,
+            contract_start=config.contract_start,
         )
-        if billing.finalised:
-            msg = "Unfinalise this month's billing?"
-        else:
-            msg = "Finalise this month's billing?"
+        if not lines:
+            self.notify("Nothing to bill", severity="warning")
+            return
 
-        def handle_confirm(confirmed: bool | None) -> None:
-            if confirmed:
-                billing.finalised = not billing.finalised
-                storage.save_monthly_billing(billing)
-                self._refresh_billing_display()
+        ticket_count = len(storage.get_billable_tickets(
+            contract_start=config.contract_start,
+        ))
+        total_inc = sum((ln.amount_inc_vat for ln in lines), Decimal("0"))
+        total_inc_str = f"£{total_inc:,.2f}"
 
-        self.push_screen(ConfirmScreen(msg), handle_confirm)
+        today = date.today()
+
+        def handle_result(result: tuple[int, int] | None) -> None:
+            if result is None:
+                return
+            year, month = result
+            billed_ids = storage.finalise_bill(
+                year, month, contract_start=config.contract_start,
+            )
+            month_name = date(year, month, 1).strftime("%B %Y")
+            self.notify(
+                f"Bill finalised for {month_name}: "
+                f"{len(billed_ids)} ticket(s), {total_inc_str}",
+            )
+            self._refresh_billing_display()
+
+        self.push_screen(
+            FinaliseBillScreen(today.year, today.month, ticket_count, total_inc_str),
+            handle_result,
+        )
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         """Handle cell selection events (no-op for allocations; handled by key/double-click)."""

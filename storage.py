@@ -135,6 +135,20 @@ def init_db():
             "ALTER TABLE tickets ADD COLUMN deliverable_id TEXT"
         )
 
+    # Migration: Add billed flag and audit columns
+    if "billed" not in ticket_columns:
+        conn.execute(
+            "ALTER TABLE tickets ADD COLUMN billed INTEGER DEFAULT 0"
+        )
+    if "billed_year" not in ticket_columns:
+        conn.execute(
+            "ALTER TABLE tickets ADD COLUMN billed_year INTEGER"
+        )
+    if "billed_month" not in ticket_columns:
+        conn.execute(
+            "ALTER TABLE tickets ADD COLUMN billed_month INTEGER"
+        )
+
     # Seed points_start_date config if not yet set
     row = conn.execute(
         "SELECT value FROM config WHERE key = 'points_start_date'"
@@ -561,6 +575,9 @@ def _row_to_ticket(row: sqlite3.Row) -> Ticket:
         created_at=date.fromisoformat(row["created_at"]) if row["created_at"] else None,
         points_entered=bool(row["points_entered"]) if "points_entered" in keys else False,
         deliverable_id=row["deliverable_id"] if "deliverable_id" in keys else None,
+        billed=bool(row["billed"]) if "billed" in keys else False,
+        billed_year=row["billed_year"] if "billed_year" in keys else None,
+        billed_month=row["billed_month"] if "billed_month" in keys else None,
     )
 
 
@@ -571,8 +588,9 @@ def save_ticket(ticket: Ticket) -> None:
     conn.execute(
         """
         INSERT OR REPLACE INTO tickets
-            (id, description, archived, created_at, points_entered, deliverable_id)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (id, description, archived, created_at, points_entered,
+             deliverable_id, billed, billed_year, billed_month)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ticket.id,
@@ -581,6 +599,9 @@ def save_ticket(ticket: Ticket) -> None:
             created_at.isoformat(),
             int(ticket.points_entered),
             ticket.deliverable_id,
+            int(ticket.billed),
+            ticket.billed_year,
+            ticket.billed_month,
         ),
     )
     conn.commit()
@@ -669,9 +690,17 @@ def archive_ticket(ticket_id: str) -> None:
 
 
 def unarchive_ticket(ticket_id: str) -> None:
-    """Unarchive a ticket."""
+    """Reopen a closed ticket and clear any billed state.
+
+    Reopening implies the work isn't actually finished, so any prior
+    billing claim must be retracted.
+    """
     conn = get_connection()
-    conn.execute("UPDATE tickets SET archived = 0 WHERE id = ?", (ticket_id,))
+    conn.execute(
+        "UPDATE tickets SET archived = 0, billed = 0, "
+        "billed_year = NULL, billed_month = NULL WHERE id = ?",
+        (ticket_id,),
+    )
     conn.commit()
     conn.close()
 
@@ -1063,25 +1092,54 @@ class DeliverableBillingLine:
     amount_inc_vat: Decimal
 
 
-def get_billing_summary_for_month(
-    year: int,
-    month: int,
+def get_billable_tickets(
+    contract_start: date | None = None,
+) -> list[Ticket]:
+    """Get all tickets that are closed but not yet billed.
+
+    If contract_start is given, only returns tickets that have at least
+    one allocation on or after that date - so closed tickets whose
+    hours pre-date the points contract (and were thus billed hourly)
+    are excluded from the points-billing list.
+    """
+    conn = get_connection()
+    if contract_start is not None:
+        rows = conn.execute(
+            """
+            SELECT t.* FROM tickets t
+            WHERE t.archived = 1 AND t.billed = 0
+              AND EXISTS (
+                  SELECT 1 FROM ticket_allocations ta
+                  WHERE ta.ticket_id = t.id AND ta.date >= ?
+              )
+            ORDER BY t.id
+            """,
+            (contract_start.isoformat(),),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM tickets WHERE archived = 1 AND billed = 0 ORDER BY id",
+        ).fetchall()
+    conn.close()
+    return [_row_to_ticket(row) for row in rows]
+
+
+def get_current_bill_summary(
     hours_per_point: Decimal,
     point_rate: Decimal,
     vat_rate: Decimal,
+    contract_start: date | None = None,
 ) -> list[DeliverableBillingLine]:
-    """Get billing breakdown by deliverable for a month.
+    """Get billing breakdown by deliverable for all closed-and-unbilled tickets.
 
     Returns a list of DeliverableBillingLine, one per deliverable
-    (plus one for unlinked allocations if any).
+    (plus one for unlinked allocations if any). Sums allocations on
+    each billable ticket. If contract_start is given, only counts
+    allocations on or after that date - so pre-points-system hours
+    (already billed hourly) don't appear here.
     """
-    from calendar import monthrange
-
-    start = date(year, month, 1)
-    end = date(year, month, monthrange(year, month)[1])
     conn = get_connection()
-    rows = conn.execute(
-        """
+    sql = """
         SELECT
             t.deliverable_id,
             d.title as deliverable_title,
@@ -1092,13 +1150,18 @@ def get_billing_summary_for_month(
         JOIN tickets t ON ta.ticket_id = t.id
         LEFT JOIN deliverables d ON t.deliverable_id = d.id
         LEFT JOIN work_packages wp ON d.work_package_id = wp.id
-        WHERE ta.date >= ? AND ta.date <= ?
-            AND t.archived = 1
+        WHERE t.archived = 1 AND t.billed = 0
+    """
+    params: list[object] = []
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    sql += """
         GROUP BY t.deliverable_id
+        HAVING total_hours > 0
         ORDER BY d.work_package_id, t.deliverable_id
-        """,
-        (start.isoformat(), end.isoformat()),
-    ).fetchall()
+    """
+    rows = conn.execute(sql, params).fetchall()
     conn.close()
 
     lines: list[DeliverableBillingLine] = []
@@ -1120,27 +1183,38 @@ def get_billing_summary_for_month(
     return lines
 
 
-def get_year_to_date_points(
-    contract_start: date,
-    up_to_year: int,
-    up_to_month: int,
+def get_billed_points_total(
     hours_per_point: Decimal,
+    up_to_year: int | None = None,
+    up_to_month: int | None = None,
+    contract_start: date | None = None,
 ) -> Decimal:
-    """Get total points used from contract start up to end of a given month."""
-    from calendar import monthrange
+    """Get total points already billed (closed + billed tickets).
 
-    end = date(up_to_year, up_to_month, monthrange(up_to_year, up_to_month)[1])
+    Optionally filter to bills marked with billed_year/billed_month
+    on or before the given year/month. If contract_start is given,
+    only counts allocations on or after that date - so any hours that
+    pre-date the points contract (billed under the prior hourly scheme)
+    don't pollute the points-system YTD totals.
+    """
     conn = get_connection()
-    row = conn.execute(
-        """
+    sql = """
         SELECT COALESCE(SUM(CAST(ta.hours AS REAL)), 0) as total
         FROM ticket_allocations ta
         JOIN tickets t ON ta.ticket_id = t.id
-        WHERE ta.date >= ? AND ta.date <= ?
-            AND t.archived = 1
-        """,
-        (contract_start.isoformat(), end.isoformat()),
-    ).fetchone()
+        WHERE t.billed = 1
+    """
+    params: list[object] = []
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    if up_to_year is not None and up_to_month is not None:
+        sql += (
+            " AND (t.billed_year < ? OR "
+            "(t.billed_year = ? AND t.billed_month <= ?))"
+        )
+        params.extend([up_to_year, up_to_year, up_to_month])
+    row = conn.execute(sql, params).fetchone()
     conn.close()
     total_hours = Decimal(str(row["total"])).quantize(Decimal("0.01"))
     return (total_hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING)
@@ -1150,11 +1224,13 @@ def get_monthly_points_breakdown(
     year: int,
     month: int,
     hours_per_point: Decimal,
-) -> tuple[int, int]:
-    """Get billable and speculative points for a single month.
+) -> tuple[int, int, int]:
+    """Get points breakdown for work done in a single month.
 
-    Billable = archived tickets, speculative = non-archived.
-    Returns (billable_points, speculative_points).
+    Returns (billed_points, billable_points, speculative_points):
+    - billed: closed and already billed
+    - billable: closed but not yet billed
+    - speculative: still open
     """
     from calendar import monthrange
 
@@ -1163,27 +1239,161 @@ def get_monthly_points_breakdown(
     conn = get_connection()
     rows = conn.execute(
         """
-        SELECT t.archived, ta.ticket_id,
+        SELECT t.archived, t.billed, ta.ticket_id,
                SUM(CAST(ta.hours AS REAL)) as total
         FROM ticket_allocations ta
         JOIN tickets t ON ta.ticket_id = t.id
         WHERE ta.date >= ? AND ta.date <= ?
-        GROUP BY ta.ticket_id, t.archived
+        GROUP BY ta.ticket_id, t.archived, t.billed
         """,
         (start.isoformat(), end.isoformat()),
     ).fetchall()
     conn.close()
 
+    billed = 0
     billable = 0
     speculative = 0
     for row in rows:
         hours = Decimal(str(row["total"]))
         pts = int((hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING))
-        if row["archived"]:
+        if row["archived"] and row["billed"]:
+            billed += pts
+        elif row["archived"]:
             billable += pts
         else:
             speculative += pts
-    return billable, speculative
+    return billed, billable, speculative
+
+
+def get_carryover_tickets(
+    year: int, month: int,
+    contract_start: date | None = None,
+) -> list[tuple[Ticket, Decimal]]:
+    """Get unbilled tickets with allocations strictly before the given month.
+
+    Excludes tickets that already have allocations in the given month
+    (those are already shown in the main allocations list). Returns
+    each ticket paired with its allocated hours total. If contract_start
+    is given, only counts allocations on or after that date - so
+    tickets with only pre-points-system work (already billed hourly)
+    don't appear as carryover.
+    """
+    from calendar import monthrange
+
+    month_start = date(year, month, 1).isoformat()
+    month_end = date(year, month, monthrange(year, month)[1]).isoformat()
+
+    conn = get_connection()
+    sql = """
+        SELECT t.*,
+               COALESCE(SUM(CAST(ta.hours AS REAL)), 0) as lifetime_hours
+        FROM tickets t
+        JOIN ticket_allocations ta ON ta.ticket_id = t.id
+        WHERE t.billed = 0
+          AND ta.date < ?
+    """
+    params: list[object] = [month_start]
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    sql += """
+          AND NOT EXISTS (
+              SELECT 1 FROM ticket_allocations ta2
+              WHERE ta2.ticket_id = t.id
+                AND ta2.date >= ? AND ta2.date <= ?
+          )
+        GROUP BY t.id
+        HAVING lifetime_hours > 0
+        ORDER BY t.id
+    """
+    params.extend([month_start, month_end])
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+
+    return [
+        (
+            _row_to_ticket(row),
+            Decimal(str(row["lifetime_hours"])).quantize(Decimal("0.01")),
+        )
+        for row in rows
+    ]
+
+
+def finalise_bill(
+    year: int, month: int,
+    contract_start: date | None = None,
+) -> list[str]:
+    """Mark all currently-billable tickets as billed for the given month.
+
+    Atomic: marks tickets and saves the monthly_billing record in one
+    transaction. Returns the list of ticket IDs that were billed. If
+    contract_start is given, only tickets with at least one allocation
+    on or after that date are marked - so historical hourly-billed
+    tickets aren't pulled into the points billing record.
+    """
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if contract_start is not None:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tickets t
+                WHERE t.archived = 1 AND t.billed = 0
+                  AND EXISTS (
+                      SELECT 1 FROM ticket_allocations ta
+                      WHERE ta.ticket_id = t.id AND ta.date >= ?
+                  )
+                """,
+                (contract_start.isoformat(),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id FROM tickets WHERE archived = 1 AND billed = 0",
+            ).fetchall()
+        ticket_ids = [row["id"] for row in rows]
+        if ticket_ids:
+            placeholders = ",".join("?" * len(ticket_ids))
+            conn.execute(
+                f"UPDATE tickets SET billed = 1, billed_year = ?, "
+                f"billed_month = ? WHERE id IN ({placeholders}) "
+                f"AND archived = 1 AND billed = 0",
+                [year, month, *ticket_ids],
+            )
+        conn.execute(
+            "INSERT OR REPLACE INTO monthly_billing "
+            "(year, month, finalised) VALUES (?, ?, 1)",
+            (year, month),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return ticket_ids
+
+
+def unfinalise_bill(year: int, month: int) -> None:
+    """Reverse a bill finalisation - clear billed marks and the record."""
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE tickets SET billed = 0, billed_year = NULL, "
+            "billed_month = NULL WHERE billed_year = ? AND billed_month = ?",
+            (year, month),
+        )
+        conn.execute(
+            "UPDATE monthly_billing SET finalised = 0 "
+            "WHERE year = ? AND month = ?",
+            (year, month),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def get_cumulative_point_budget(

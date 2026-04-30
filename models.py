@@ -66,6 +66,9 @@ class Ticket:
     created_at: date | None = None
     points_entered: bool = False
     deliverable_id: str | None = None
+    billed: bool = False
+    billed_year: int | None = None
+    billed_month: int | None = None
 
 
 @dataclass

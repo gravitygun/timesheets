@@ -1910,3 +1910,98 @@ class ExportAllocationsScreen(ModalScreen[str | None]):
             return
 
         self.dismiss(str(output))
+
+
+class FinaliseBillScreen(ModalScreen[tuple[int, int] | None]):
+    """Modal to confirm finalising the current bill against a target month."""
+
+    CSS = """
+    FinaliseBillScreen {
+        align: center middle;
+    }
+
+    #finalise-dialog {
+        width: 60;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    #finalise-dialog Label {
+        margin-bottom: 1;
+    }
+
+    #finalise-month {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    #finalise-buttons {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+
+    #finalise-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(
+        self, year: int, month: int, ticket_count: int, total_inc_vat: str,
+    ) -> None:
+        super().__init__()
+        self.initial_year = year
+        self.initial_month = month
+        self.ticket_count = ticket_count
+        self.total_inc_vat = total_inc_vat
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="finalise-dialog"):
+            yield Label(
+                f"Finalise bill: {self.ticket_count} ticket(s), "
+                f"{self.total_inc_vat} inc VAT",
+            )
+            yield Label("Bill against month (YYYY-MM):")
+            yield Input(
+                id="finalise-month",
+                value=f"{self.initial_year}-{self.initial_month:02d}",
+                placeholder="YYYY-MM",
+            )
+            with Horizontal(id="finalise-buttons"):
+                yield Button("Finalise", variant="primary", id="finalise-btn")
+                yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#finalise-month", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "finalise-month":
+            self._finalise()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "finalise-btn":
+            self._finalise()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _finalise(self) -> None:
+        month_str = self.query_one("#finalise-month", Input).value.strip()
+        try:
+            parts = month_str.split("-")
+            year = int(parts[0])
+            month = int(parts[1])
+            if month < 1 or month > 12:
+                raise ValueError
+        except (ValueError, IndexError):
+            self.app.notify("Invalid month format (use YYYY-MM)", severity="error")
+            return
+        self.dismiss((year, month))
