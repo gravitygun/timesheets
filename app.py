@@ -1684,14 +1684,14 @@ class TimesheetApp(App):
         billable_pts = 0
         speculative_pts = 0
         if show_points:
-            for tid in ticket_ids:
-                total_lifetime = lifetime_hours.get(tid, Decimal("0"))
-                pts = calculate_points(total_lifetime, config.hours_per_point)
-                ticket_obj = all_tickets.get(tid)
-                if ticket_obj and ticket_obj.archived:
-                    billable_pts += pts
-                else:
-                    speculative_pts += pts
+            # Per-deliverable rounding (matches billing view) so totals reconcile.
+            # This is global (across all tickets), not just this month - the
+            # bottom-line summary reports the actual current bill, not a
+            # month-scoped figure.
+            _, billable_pts, speculative_pts = storage.get_points_by_status(
+                config.hours_per_point,
+                contract_start=config.contract_start,
+            )
 
             worked_row.append(Text(""))
             status_row.append(Text(""))

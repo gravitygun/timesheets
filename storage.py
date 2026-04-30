@@ -1265,6 +1265,53 @@ def get_monthly_points_breakdown(
     return billed, billable, speculative
 
 
+def get_points_by_status(
+    hours_per_point: Decimal,
+    contract_start: date | None = None,
+) -> tuple[int, int, int]:
+    """Total points by status: (billed, billable, speculative).
+
+    Hours are summed per (deliverable, status) bucket and rounded per
+    bucket - matching the per-deliverable rounding used in the billing
+    view. This is the truthful billing figure and avoids the inflation
+    you get when you round per ticket and then sum.
+    """
+    conn = get_connection()
+    sql = """
+        SELECT
+            t.deliverable_id,
+            t.archived,
+            t.billed,
+            SUM(CAST(ta.hours AS REAL)) as total_hours
+        FROM ticket_allocations ta
+        JOIN tickets t ON ta.ticket_id = t.id
+        WHERE 1=1
+    """
+    params: list[object] = []
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    sql += " GROUP BY t.deliverable_id, t.archived, t.billed"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+
+    billed = 0
+    billable = 0
+    speculative = 0
+    for row in rows:
+        hours = Decimal(str(row["total_hours"]))
+        pts = int((hours / hours_per_point).to_integral_value(
+            rounding=ROUND_CEILING,
+        ))
+        if row["archived"] and row["billed"]:
+            billed += pts
+        elif row["archived"]:
+            billable += pts
+        else:
+            speculative += pts
+    return billed, billable, speculative
+
+
 def get_carryover_tickets(
     year: int, month: int,
     contract_start: date | None = None,
