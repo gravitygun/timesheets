@@ -786,9 +786,9 @@ class TestMonthlyPointBudgets:
     def test_seed_data(self, temp_database):
         """Test that monthly budgets are seeded on init."""
         storage = temp_database
-        assert storage.get_monthly_point_budget(2026, 4) == 68
-        assert storage.get_monthly_point_budget(2026, 7) == 69
-        assert storage.get_monthly_point_budget(2027, 3) == 69
+        assert storage.get_monthly_point_budget(2026, 4) == 80
+        assert storage.get_monthly_point_budget(2026, 7) == 80
+        assert storage.get_monthly_point_budget(2027, 3) == 80
 
     def test_get_nonexistent_budget(self, temp_database):
         """Test getting a nonexistent budget returns None."""
@@ -911,7 +911,7 @@ class TestContractConfig:
         config = storage.get_config()
         assert config.contract_start == date(2026, 4, 1)
         assert config.contract_end == date(2027, 3, 31)
-        assert config.annual_max_points == 825
+        assert config.annual_max_points == 960
 
     def test_contract_config_round_trip(self, temp_database):
         """Test saving and loading contract config."""

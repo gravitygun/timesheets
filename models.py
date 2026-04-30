@@ -53,7 +53,7 @@ class Config:
     points_start_date: date | None = None
     contract_start: date | None = None
     contract_end: date | None = None
-    annual_max_points: int = 825
+    annual_max_points: int = 960
 
 
 @dataclass

@@ -149,7 +149,7 @@ def init_db():
     for key, value in [
         ("contract_start", "2026-04-01"),
         ("contract_end", "2027-03-31"),
-        ("annual_max_points", "825"),
+        ("annual_max_points", "960"),
     ]:
         existing = conn.execute(
             "SELECT value FROM config WHERE key = ?", (key,)
@@ -169,6 +169,15 @@ def init_db():
             "UPDATE config SET value = '200' WHERE key = 'point_rate'"
         )
 
+    # Update annual_max_points from 825 to 960 (contract amendment)
+    annual_row = conn.execute(
+        "SELECT value FROM config WHERE key = 'annual_max_points'"
+    ).fetchone()
+    if annual_row and annual_row["value"] == "825":
+        conn.execute(
+            "UPDATE config SET value = '960' WHERE key = 'annual_max_points'"
+        )
+
     # Seed work packages and deliverables if empty
     wp_count = conn.execute("SELECT COUNT(*) as c FROM work_packages").fetchone()
     if wp_count["c"] == 0:
@@ -183,6 +192,9 @@ def init_db():
     ).fetchone()
     if budget_count["c"] == 0:
         _seed_monthly_point_budgets(conn)
+    else:
+        # Migration: bump existing monthly budgets to new contract values
+        _update_monthly_point_budgets(conn)
 
     conn.commit()
     conn.close()
@@ -292,15 +304,31 @@ def _backfill_inactive_deliverables(conn: sqlite3.Connection) -> None:
 def _seed_monthly_point_budgets(conn: sqlite3.Connection) -> None:
     """Seed monthly point budgets from the contract fee schedule."""
     budgets = [
-        (2026, 4, 68), (2026, 5, 68), (2026, 6, 68),
-        (2026, 7, 69), (2026, 8, 69), (2026, 9, 69),
-        (2026, 10, 69), (2026, 11, 69), (2026, 12, 69),
-        (2027, 1, 69), (2027, 2, 69), (2027, 3, 69),
+        (2026, 4, 80), (2026, 5, 80), (2026, 6, 80),
+        (2026, 7, 80), (2026, 8, 80), (2026, 9, 80),
+        (2026, 10, 80), (2026, 11, 80), (2026, 12, 80),
+        (2027, 1, 80), (2027, 2, 80), (2027, 3, 80),
     ]
     for year, month, points in budgets:
         conn.execute(
             "INSERT INTO monthly_point_budgets (year, month, max_points) "
             "VALUES (?, ?, ?)",
+            (year, month, points),
+        )
+
+
+def _update_monthly_point_budgets(conn: sqlite3.Connection) -> None:
+    """Update existing monthly budgets to new contract values (80 pts/month)."""
+    new_budgets = [
+        (2026, 4, 80), (2026, 5, 80), (2026, 6, 80),
+        (2026, 7, 80), (2026, 8, 80), (2026, 9, 80),
+        (2026, 10, 80), (2026, 11, 80), (2026, 12, 80),
+        (2027, 1, 80), (2027, 2, 80), (2027, 3, 80),
+    ]
+    for year, month, points in new_budgets:
+        conn.execute(
+            "INSERT OR REPLACE INTO monthly_point_budgets "
+            "(year, month, max_points) VALUES (?, ?, ?)",
             (year, month, points),
         )
 
