@@ -38,7 +38,10 @@ dump_db_to() {
     red "DB not found at ${DB_PATH}"
     exit 1
   fi
-  sqlite3 "${DB_PATH}" .dump >"${target}"
+  # Strip sqlite_sequence inserts: SQLite auto-populates that table from the
+  # data INSERTs during restore, so the explicit rows are redundant. Without
+  # this the dump grows by one duplicate row each pull-restore cycle.
+  sqlite3 "${DB_PATH}" .dump | grep -v '^INSERT INTO sqlite_sequence ' >"${target}"
 }
 
 local_dirty() {
