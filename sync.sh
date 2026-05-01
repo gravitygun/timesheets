@@ -190,7 +190,7 @@ cmd_status() {
 
   echo
   echo "Last 3 commits:"
-  git log --oneline -3 || true
+  git --no-pager log --oneline -3 || true
 }
 
 main() {
