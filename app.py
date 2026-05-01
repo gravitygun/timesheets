@@ -1687,6 +1687,7 @@ class TimesheetApp(App):
         week_total_row.append(entered_cell)
 
         # Points totals for summary rows
+        billed_pts = 0
         billable_pts = 0
         speculative_pts = 0
         if show_points:
@@ -1694,7 +1695,7 @@ class TimesheetApp(App):
             # This is global (across all tickets), not just this month - the
             # bottom-line summary reports the actual current bill, not a
             # month-scoped figure.
-            _, billable_pts, speculative_pts = storage.get_points_by_status(
+            billed_pts, billable_pts, speculative_pts = storage.get_points_by_status(
                 config.hours_per_point,
                 contract_start=config.contract_start,
             )
@@ -1702,7 +1703,8 @@ class TimesheetApp(App):
             worked_row.append(Text(""))
             status_row.append(Text(""))
             pts_summary = Text()
-            pts_summary.append(f"{billable_pts}", style="bold green")
+            total_committed = billed_pts + billable_pts
+            pts_summary.append(f"{total_committed}", style="bold green")
             pts_summary.append(f"/{speculative_pts}", style="dim")
             week_total_row.append(pts_summary)
 
