@@ -59,13 +59,15 @@ run_both() {
   "${SCRIPT_DIR}/sync.sh" pull
   trap push_on_exit EXIT
 
-  yellow "Starting API in background…"
-  "${SCRIPT_DIR}/run_api.sh" &
+  local log_file="${HOME}/.timesheets-api.log"
+  yellow "Starting API in background (logs: ${log_file})…"
+  "${SCRIPT_DIR}/run_api.sh" >"${log_file}" 2>&1 &
   API_PID=$!
   sleep 1
 
   if ! kill -0 "${API_PID}" 2>/dev/null; then
-    red "API failed to start."
+    red "API failed to start. Last log lines:"
+    tail -20 "${log_file}" >&2 || true
     exit 1
   fi
 
