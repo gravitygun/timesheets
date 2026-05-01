@@ -317,6 +317,9 @@ class TimesheetApp(App):
         # Privacy mode: hide earnings by default
         self.show_money = False
 
+        # Billing view: None = current bill; (year, month) = a finalised bill
+        self.billing_view_period: tuple[int, int] | None = None
+
         # Clipboard for cut/copy/paste
         self._day_clipboard: TimeEntry | None = None
 
@@ -518,6 +521,9 @@ class TimesheetApp(App):
         if self.show_money:
             year_table.add_column("Bill", width=10)
             year_table.add_column("+VAT", width=10)
+
+        # Rebuild billing table
+        self._setup_billing_table()
 
     def _load_month_data(self):
         """Load all entries for current month into memory."""
@@ -1846,13 +1852,13 @@ class TimesheetApp(App):
         elif action == "goto_today":
             return mode in ("week", "month") or False
         elif action in ("alloc_prev_month", "alloc_next_month"):
-            return mode == "allocations" or False
+            return mode in ("allocations", "billing") or False
 
         # Week/day view
         elif action == "edit_day":
             return mode in ("week", "day") or False
         elif action == "toggle_money":
-            return mode in ("month", "year") or False
+            return mode in ("month", "year", "allocations", "billing") or False
 
         # Year view only
         elif action == "populate_holidays":
@@ -1872,9 +1878,9 @@ class TimesheetApp(App):
         elif action == "export_allocations":
             return mode == "allocations" or False
 
-        # Billing view only
+        # Billing view only — only when viewing the current (unbilled) bill
         elif action == "finalise_billing":
-            return mode == "billing" or False
+            return (mode == "billing" and self.billing_view_period is None) or False
 
         # Ticket/deliverable management — always available
         elif action == "manage_tickets":
@@ -2321,6 +2327,7 @@ class TimesheetApp(App):
         """Switch to billing view."""
         if self.view_mode == "week":
             self.last_selected_date = self._get_selected_date()
+        self.billing_view_period = None
         self._set_view_mode("billing")
 
     def action_toggle_points_entered(self):
@@ -3001,8 +3008,9 @@ class TimesheetApp(App):
         self._restore_alloc_cursor(source_alloc.ticket_id)
 
     def action_alloc_prev_month(self) -> None:
-        """Navigate to the previous month in allocations view."""
+        """Navigate to the previous month in allocations or billing view."""
         if self.view_mode == "billing":
+            self._navigate_bill(-1)
             return
         if self.current_month == 1:
             self.current_year -= 1
@@ -3014,8 +3022,9 @@ class TimesheetApp(App):
         self._refresh_display()
 
     def action_alloc_next_month(self) -> None:
-        """Navigate to the next month in allocations view."""
+        """Navigate to the next month in allocations or billing view."""
         if self.view_mode == "billing":
+            self._navigate_bill(+1)
             return
         if self.current_month == 12:
             self.current_year += 1
@@ -3025,6 +3034,26 @@ class TimesheetApp(App):
         self.weeks = get_weeks_in_month(self.current_year, self.current_month)
         self._load_month_data()
         self._refresh_display()
+
+    def _navigate_bill(self, direction: int) -> None:
+        """Step through finalised bills (and current) in billing view.
+
+        Order: oldest finalised … newest finalised, then current (None).
+        direction = -1 steps backwards, +1 steps forwards.
+        """
+        finalised = storage.get_finalised_bills()
+        if not finalised:
+            return
+        # Sequence: [oldest, ..., newest, None]
+        sequence: list[tuple[int, int] | None] = [*finalised, None]
+        try:
+            idx = sequence.index(self.billing_view_period)
+        except ValueError:
+            idx = len(sequence) - 1
+        new_idx = idx + direction
+        if 0 <= new_idx < len(sequence):
+            self.billing_view_period = sequence[new_idx]
+            self._refresh_billing_display()
 
     def action_export_allocations(self) -> None:
         """Open the export allocations report dialog."""
@@ -3041,24 +3070,48 @@ class TimesheetApp(App):
         """Set up the billing table columns."""
         table = self.query_one("#billing-table", DataTable)
         table.cursor_type = "row"
+        table.clear(columns=True)
         table.add_column("Deliverable", width=12, key="del_id")
         table.add_column("Title", width=30, key="title")
         table.add_column("Work Package", width=10, key="wp")
         table.add_column("Hours", width=8, key="hours")
         table.add_column("Points", width=8, key="points")
-        table.add_column("Ex VAT", width=12, key="ex_vat")
-        table.add_column("Inc VAT", width=12, key="inc_vat")
+        if self.show_money:
+            table.add_column("Ex VAT", width=12, key="ex_vat")
+            table.add_column("Inc VAT", width=12, key="inc_vat")
 
     def _refresh_billing_display(self):
-        """Refresh the billing view (point-in-time current bill)."""
+        """Refresh the billing view (current or a finalised period)."""
         config = storage.get_config()
+        period = self.billing_view_period
+        finalised = storage.get_finalised_bills()
+        is_snapshot = False
 
-        lines = storage.get_current_bill_summary(
-            hours_per_point=config.hours_per_point,
-            point_rate=config.point_rate,
-            vat_rate=config.vat_rate,
-            contract_start=config.contract_start,
-        )
+        if period is None:
+            lines = storage.get_current_bill_summary(
+                hours_per_point=config.hours_per_point,
+                point_rate=config.point_rate,
+                vat_rate=config.vat_rate,
+                contract_start=config.contract_start,
+            )
+            ticket_count = len(storage.get_billable_tickets(
+                contract_start=config.contract_start,
+            ))
+        else:
+            year, month = period
+            lines = storage.get_bill_lines(year, month)
+            if lines:
+                is_snapshot = True
+            else:
+                lines = storage.get_finalised_bill_summary(
+                    year=year,
+                    month=month,
+                    hours_per_point=config.hours_per_point,
+                    point_rate=config.point_rate,
+                    vat_rate=config.vat_rate,
+                    contract_start=config.contract_start,
+                )
+            ticket_count = len(storage.get_billed_tickets_for_period(year, month))
 
         # Populate table
         table = self.query_one("#billing-table", DataTable)
@@ -3071,16 +3124,17 @@ class TimesheetApp(App):
 
         for line in lines:
             del_label = line.deliverable_id or "UNLINKED"
-            table.add_row(
+            row = [
                 del_label,
                 line.deliverable_title[:30],
                 line.work_package_id,
                 str(line.hours),
                 str(line.points),
-                f"£{line.amount_ex_vat:,.2f}",
-                f"£{line.amount_inc_vat:,.2f}",
-                key=line.deliverable_id or "unlinked",
-            )
+            ]
+            if self.show_money:
+                row.append(f"£{line.amount_ex_vat:,.2f}")
+                row.append(f"£{line.amount_inc_vat:,.2f}")
+            table.add_row(*row, key=line.deliverable_id or "unlinked")
             total_hours += line.hours
             total_points += line.points
             total_ex += line.amount_ex_vat
@@ -3088,60 +3142,103 @@ class TimesheetApp(App):
 
         # Add totals row
         if lines:
-            table.add_row(
+            totals_row = [
                 "TOTAL", "", "",
                 str(total_hours),
                 str(total_points),
-                f"£{total_ex:,.2f}",
-                f"£{total_inc:,.2f}",
-                key="__total__",
-            )
+            ]
+            if self.show_money:
+                totals_row.append(f"£{total_ex:,.2f}")
+                totals_row.append(f"£{total_inc:,.2f}")
+            table.add_row(*totals_row, key="__total__")
 
         # Update header
-        billable_tickets = storage.get_billable_tickets(
-            contract_start=config.contract_start,
-        )
-        ticket_count = len(billable_tickets)
+        if period is None:
+            label = "CURRENT BILL"
+        else:
+            label = (
+                f"BILL {date(period[0], period[1], 1).strftime('%b %Y').upper()}"
+            )
         header = self.query_one("#billing-header", Static)
-        header.update(
-            f"  CURRENT BILL  ({ticket_count} ticket(s), "
-            f"{int(total_points)} pts, £{total_inc:,.2f} inc VAT)",
+        header_text = (
+            f"  {label}  ({ticket_count} ticket(s), "
+            f"{int(total_points)} pts"
         )
+        if self.show_money:
+            header_text += f", £{total_inc:,.2f} inc VAT"
+        header_text += ")"
+        header.update(header_text)
 
         # Annual cap calculation against billed-to-date
         billed_ytd = storage.get_billed_points_total(
             config.hours_per_point, contract_start=config.contract_start,
         )
-        after_finalising = billed_ytd + total_points
-        annual_remaining = Decimal(str(config.annual_max_points)) - after_finalising
-
-        summary_parts = [
-            f"Billed YTD: {int(billed_ytd)} pts  |  "
-            f"This bill: {int(total_points)} pts  |  "
-            f"After finalising: {int(after_finalising)} / "
-            f"{config.annual_max_points} pts "
-            f"({int(annual_remaining)} remaining)",
-            f"Rate: £{config.point_rate}/pt (1 pt = {config.hours_per_point}h)"
-            f"  |  VAT: {config.vat_rate * 100:.0f}%",
-        ]
-
-        # Warn about unlinked allocations
-        unlinked = [ln for ln in lines if ln.deliverable_id is None]
-        if unlinked:
+        if period is None:
+            after_finalising = billed_ytd + total_points
+            annual_remaining = (
+                Decimal(str(config.annual_max_points)) - after_finalising
+            )
+            summary_parts = [
+                f"Billed YTD: {int(billed_ytd)} pts  |  "
+                f"This bill: {int(total_points)} pts  |  "
+                f"After finalising: {int(after_finalising)} / "
+                f"{config.annual_max_points} pts "
+                f"({int(annual_remaining)} remaining)",
+            ]
+        else:
+            label = "Snapshot" if is_snapshot else "Reconstructed"
+            summary_parts = [
+                f"{label}: {int(total_points)} pts across "
+                f"{ticket_count} ticket(s)",
+            ]
+            if not is_snapshot:
+                summary_parts.append(
+                    "[yellow]Note:[/yellow] this bill predates snapshotting; "
+                    "figures are derived from current allocations and may "
+                    "differ from what was actually billed.",
+                )
+        if self.show_money:
             summary_parts.append(
-                f"WARNING: {unlinked[0].hours}h on tickets with no deliverable assigned",
+                f"Rate: £{config.point_rate}/pt (1 pt = {config.hours_per_point}h)"
+                f"  |  VAT: {config.vat_rate * 100:.0f}%",
             )
 
-        if ticket_count > 0:
-            summary_parts.append("Press [bold]f[/bold] to finalise this bill")
-        else:
-            summary_parts.append("Nothing to bill right now")
+        # Warn about unlinked allocations (current bill only)
+        if period is None:
+            unlinked = [ln for ln in lines if ln.deliverable_id is None]
+            if unlinked:
+                summary_parts.append(
+                    f"WARNING: {unlinked[0].hours}h on tickets "
+                    f"with no deliverable assigned",
+                )
+
+        # Navigation hint
+        if finalised:
+            nav_bits: list[str] = []
+            if period is None:
+                if finalised:
+                    nav_bits.append("[bold][[/bold] previous bills")
+            else:
+                sequence: list[tuple[int, int] | None] = [*finalised, None]
+                idx = sequence.index(period)
+                if idx > 0:
+                    nav_bits.append("[bold][[/bold] older")
+                if idx < len(sequence) - 1:
+                    nav_bits.append("[bold]][/bold] newer")
+            if nav_bits:
+                summary_parts.append("  ".join(nav_bits))
+
+        if period is None:
+            if ticket_count > 0:
+                summary_parts.append("Press [bold]f[/bold] to finalise this bill")
+            else:
+                summary_parts.append("Nothing to bill right now")
 
         self.query_one("#billing-summary", Static).update("\n".join(summary_parts))
 
     def action_finalise_billing(self) -> None:
         """Open the finalise-bill modal to commit the current bill."""
-        if self.view_mode != "billing":
+        if self.view_mode != "billing" or self.billing_view_period is not None:
             return
 
         config = storage.get_config()
@@ -3168,7 +3265,11 @@ class TimesheetApp(App):
                 return
             year, month = result
             billed_ids = storage.finalise_bill(
-                year, month, contract_start=config.contract_start,
+                year, month,
+                hours_per_point=config.hours_per_point,
+                point_rate=config.point_rate,
+                vat_rate=config.vat_rate,
+                contract_start=config.contract_start,
             )
             month_name = date(year, month, 1).strftime("%B %Y")
             self.notify(

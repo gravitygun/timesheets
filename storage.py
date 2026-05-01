@@ -101,6 +101,21 @@ def init_db():
             PRIMARY KEY (year, month)
         );
 
+        CREATE TABLE IF NOT EXISTS bill_lines (
+            year INTEGER NOT NULL,
+            month INTEGER NOT NULL,
+            line_no INTEGER NOT NULL,
+            deliverable_id TEXT,
+            deliverable_title TEXT NOT NULL,
+            work_package_id TEXT NOT NULL DEFAULT '',
+            work_package_title TEXT NOT NULL DEFAULT '',
+            hours TEXT NOT NULL,
+            points INTEGER NOT NULL,
+            amount_ex_vat TEXT NOT NULL,
+            amount_inc_vat TEXT NOT NULL,
+            PRIMARY KEY (year, month, line_no)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_entries_date ON time_entries(date);
         CREATE INDEX IF NOT EXISTS idx_allocations_date ON ticket_allocations(date);
         CREATE INDEX IF NOT EXISTS idx_allocations_ticket ON ticket_allocations(ticket_id);
@@ -1183,6 +1198,91 @@ def get_current_bill_summary(
     return lines
 
 
+def get_finalised_bills() -> list[tuple[int, int]]:
+    """Return finalised bill periods as (year, month), oldest first."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT year, month FROM monthly_billing WHERE finalised = 1 "
+        "ORDER BY year, month",
+    ).fetchall()
+    conn.close()
+    return [(row["year"], row["month"]) for row in rows]
+
+
+def get_billed_tickets_for_period(year: int, month: int) -> list[Ticket]:
+    """Get all tickets that were billed in the given period."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM tickets WHERE billed = 1 "
+        "AND billed_year = ? AND billed_month = ? ORDER BY id",
+        (year, month),
+    ).fetchall()
+    conn.close()
+    return [_row_to_ticket(row) for row in rows]
+
+
+def get_finalised_bill_summary(
+    year: int,
+    month: int,
+    hours_per_point: Decimal,
+    point_rate: Decimal,
+    vat_rate: Decimal,
+    contract_start: date | None = None,
+) -> list[DeliverableBillingLine]:
+    """Get billing breakdown by deliverable for a finalised bill period.
+
+    Mirrors get_current_bill_summary but selects tickets stamped with the
+    given billed_year/billed_month rather than the unbilled set. Used as
+    a derivation fallback when no bill_lines snapshot exists for the
+    period; respects contract_start so pre-points-system hours on a
+    billed ticket don't get double-counted.
+    """
+    conn = get_connection()
+    sql = """
+        SELECT
+            t.deliverable_id,
+            d.title as deliverable_title,
+            d.work_package_id,
+            wp.title as work_package_title,
+            SUM(CAST(ta.hours AS REAL)) as total_hours
+        FROM ticket_allocations ta
+        JOIN tickets t ON ta.ticket_id = t.id
+        LEFT JOIN deliverables d ON t.deliverable_id = d.id
+        LEFT JOIN work_packages wp ON d.work_package_id = wp.id
+        WHERE t.archived = 1 AND t.billed = 1
+          AND t.billed_year = ? AND t.billed_month = ?
+    """
+    params: list[object] = [year, month]
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    sql += """
+        GROUP BY t.deliverable_id
+        HAVING total_hours > 0
+        ORDER BY d.work_package_id, t.deliverable_id
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+
+    lines: list[DeliverableBillingLine] = []
+    for row in rows:
+        hours = Decimal(str(row["total_hours"])).quantize(Decimal("0.01"))
+        points = (hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING)
+        amount_ex = (points * point_rate).quantize(Decimal("0.01"))
+        amount_inc = (amount_ex * (1 + vat_rate)).quantize(Decimal("0.01"))
+        lines.append(DeliverableBillingLine(
+            deliverable_id=row["deliverable_id"],
+            deliverable_title=row["deliverable_title"] or "Unlinked",
+            work_package_id=row["work_package_id"] or "",
+            work_package_title=row["work_package_title"] or "",
+            hours=hours,
+            points=points,
+            amount_ex_vat=amount_ex,
+            amount_inc_vat=amount_inc,
+        ))
+    return lines
+
+
 def get_billed_points_total(
     hours_per_point: Decimal,
     up_to_year: int | None = None,
@@ -1366,21 +1466,78 @@ def get_carryover_tickets(
     ]
 
 
+def _compute_current_bill_lines(
+    conn: sqlite3.Connection,
+    hours_per_point: Decimal,
+    point_rate: Decimal,
+    vat_rate: Decimal,
+    contract_start: date | None,
+) -> list[DeliverableBillingLine]:
+    """Compute current bill lines using an open connection (in-tx safe)."""
+    sql = """
+        SELECT
+            t.deliverable_id,
+            d.title as deliverable_title,
+            d.work_package_id,
+            wp.title as work_package_title,
+            SUM(CAST(ta.hours AS REAL)) as total_hours
+        FROM ticket_allocations ta
+        JOIN tickets t ON ta.ticket_id = t.id
+        LEFT JOIN deliverables d ON t.deliverable_id = d.id
+        LEFT JOIN work_packages wp ON d.work_package_id = wp.id
+        WHERE t.archived = 1 AND t.billed = 0
+    """
+    params: list[object] = []
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    sql += """
+        GROUP BY t.deliverable_id
+        HAVING total_hours > 0
+        ORDER BY d.work_package_id, t.deliverable_id
+    """
+    rows = conn.execute(sql, params).fetchall()
+    lines: list[DeliverableBillingLine] = []
+    for row in rows:
+        hours = Decimal(str(row["total_hours"])).quantize(Decimal("0.01"))
+        points = (hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING)
+        amount_ex = (points * point_rate).quantize(Decimal("0.01"))
+        amount_inc = (amount_ex * (1 + vat_rate)).quantize(Decimal("0.01"))
+        lines.append(DeliverableBillingLine(
+            deliverable_id=row["deliverable_id"],
+            deliverable_title=row["deliverable_title"] or "Unlinked",
+            work_package_id=row["work_package_id"] or "",
+            work_package_title=row["work_package_title"] or "",
+            hours=hours,
+            points=points,
+            amount_ex_vat=amount_ex,
+            amount_inc_vat=amount_inc,
+        ))
+    return lines
+
+
 def finalise_bill(
     year: int, month: int,
+    hours_per_point: Decimal,
+    point_rate: Decimal,
+    vat_rate: Decimal,
     contract_start: date | None = None,
 ) -> list[str]:
     """Mark all currently-billable tickets as billed for the given month.
 
-    Atomic: marks tickets and saves the monthly_billing record in one
-    transaction. Returns the list of ticket IDs that were billed. If
-    contract_start is given, only tickets with at least one allocation
-    on or after that date are marked - so historical hourly-billed
-    tickets aren't pulled into the points billing record.
+    Atomic: computes the bill lines from current state, marks tickets,
+    saves the monthly_billing record, and snapshots the bill_lines, all
+    in one transaction. Returns the list of ticket IDs that were billed.
+    The snapshot lets the historical view show truth even if allocations
+    drift later.
     """
     conn = get_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        # Snapshot the bill lines from current state BEFORE flipping flags.
+        lines = _compute_current_bill_lines(
+            conn, hours_per_point, point_rate, vat_rate, contract_start,
+        )
         if contract_start is not None:
             rows = conn.execute(
                 """
@@ -1411,6 +1568,30 @@ def finalise_bill(
             "(year, month, finalised) VALUES (?, ?, 1)",
             (year, month),
         )
+        # Replace any existing snapshot for this period (e.g. re-finalisation).
+        conn.execute(
+            "DELETE FROM bill_lines WHERE year = ? AND month = ?",
+            (year, month),
+        )
+        for i, line in enumerate(lines):
+            conn.execute(
+                "INSERT INTO bill_lines "
+                "(year, month, line_no, deliverable_id, deliverable_title, "
+                " work_package_id, work_package_title, hours, points, "
+                " amount_ex_vat, amount_inc_vat) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    year, month, i,
+                    line.deliverable_id,
+                    line.deliverable_title,
+                    line.work_package_id,
+                    line.work_package_title,
+                    str(line.hours),
+                    int(line.points),
+                    str(line.amount_ex_vat),
+                    str(line.amount_inc_vat),
+                ),
+            )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1421,7 +1602,7 @@ def finalise_bill(
 
 
 def unfinalise_bill(year: int, month: int) -> None:
-    """Reverse a bill finalisation - clear billed marks and the record."""
+    """Reverse a bill finalisation - clear billed marks, record, and snapshot."""
     conn = get_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -1435,12 +1616,43 @@ def unfinalise_bill(year: int, month: int) -> None:
             "WHERE year = ? AND month = ?",
             (year, month),
         )
+        conn.execute(
+            "DELETE FROM bill_lines WHERE year = ? AND month = ?",
+            (year, month),
+        )
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def get_bill_lines(year: int, month: int) -> list[DeliverableBillingLine]:
+    """Return snapshotted bill lines for a finalised period.
+
+    Returns an empty list if no snapshot exists (legacy/pre-snapshot bills).
+    Callers can detect this and fall back to derivation.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM bill_lines WHERE year = ? AND month = ? ORDER BY line_no",
+        (year, month),
+    ).fetchall()
+    conn.close()
+    return [
+        DeliverableBillingLine(
+            deliverable_id=row["deliverable_id"],
+            deliverable_title=row["deliverable_title"],
+            work_package_id=row["work_package_id"],
+            work_package_title=row["work_package_title"],
+            hours=Decimal(row["hours"]),
+            points=Decimal(row["points"]),
+            amount_ex_vat=Decimal(row["amount_ex_vat"]),
+            amount_inc_vat=Decimal(row["amount_inc_vat"]),
+        )
+        for row in rows
+    ]
 
 
 def get_cumulative_point_budget(
