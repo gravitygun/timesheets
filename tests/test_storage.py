@@ -786,9 +786,9 @@ class TestMonthlyPointBudgets:
     def test_seed_data(self, temp_database):
         """Test that monthly budgets are seeded on init."""
         storage = temp_database
-        assert storage.get_monthly_point_budget(2026, 4) == 68
-        assert storage.get_monthly_point_budget(2026, 7) == 69
-        assert storage.get_monthly_point_budget(2027, 3) == 69
+        assert storage.get_monthly_point_budget(2026, 4) == 80
+        assert storage.get_monthly_point_budget(2026, 7) == 80
+        assert storage.get_monthly_point_budget(2027, 3) == 80
 
     def test_get_nonexistent_budget(self, temp_database):
         """Test getting a nonexistent budget returns None."""
@@ -820,19 +820,23 @@ class TestMonthlyBilling:
         assert retrieved.finalised is True
 
 
-class TestBillingSummary:
-    """Tests for billing summary query."""
+def _bill_args():
+    return {
+        "hours_per_point": Decimal("2"),
+        "point_rate": Decimal("200"),
+        "vat_rate": Decimal("0.20"),
+    }
 
-    def test_billing_summary_by_deliverable(self, temp_database):
-        """Test billing summary groups by deliverable (closed tickets only)."""
+
+class TestCurrentBillSummary:
+    """Tests for the get_current_bill_summary query."""
+
+    def test_groups_by_deliverable(self, temp_database):
         storage = temp_database
-        # Create closed tickets linked to deliverables
         t1 = Ticket(id="T1", description="Task 1", deliverable_id="WP2a-D1", archived=True)
         t2 = Ticket(id="T2", description="Task 2", deliverable_id="WP2a-D2", archived=True)
         storage.save_ticket(t1)
         storage.save_ticket(t2)
-
-        # Create allocations
         storage.save_allocation(TicketAllocation(
             ticket_id="T1", date=date(2026, 4, 1), hours=Decimal("4"),
         ))
@@ -840,66 +844,485 @@ class TestBillingSummary:
             ticket_id="T2", date=date(2026, 4, 1), hours=Decimal("2"),
         ))
 
-        lines = storage.get_billing_summary_for_month(
-            2026, 4,
-            hours_per_point=Decimal("2"),
-            point_rate=Decimal("200"),
-            vat_rate=Decimal("0.20"),
-        )
+        lines = storage.get_current_bill_summary(**_bill_args())
         assert len(lines) == 2
 
-        d1_line = next(l for l in lines if l.deliverable_id == "WP2a-D1")
+        d1_line = next(line for line in lines if line.deliverable_id == "WP2a-D1")
         assert d1_line.hours == Decimal("4.00")
-        assert d1_line.points == Decimal("2.0")
+        assert d1_line.points == Decimal("2")
         assert d1_line.amount_ex_vat == Decimal("400.00")
         assert d1_line.amount_inc_vat == Decimal("480.00")
 
-    def test_billing_summary_excludes_open_tickets(self, temp_database):
-        """Test billing summary excludes open (non-closed) tickets."""
+    def test_excludes_open_tickets(self, temp_database):
         storage = temp_database
         t1 = Ticket(id="T1", description="Open task", deliverable_id="WP2a-D1")
         storage.save_ticket(t1)
         storage.save_allocation(TicketAllocation(
             ticket_id="T1", date=date(2026, 4, 1), hours=Decimal("4"),
         ))
+        assert storage.get_current_bill_summary(**_bill_args()) == []
 
-        lines = storage.get_billing_summary_for_month(
-            2026, 4,
-            hours_per_point=Decimal("2"),
-            point_rate=Decimal("200"),
-            vat_rate=Decimal("0.20"),
-        )
-        assert lines == []
-
-    def test_billing_summary_unlinked(self, temp_database):
-        """Test billing summary includes unlinked closed tickets."""
+    def test_excludes_already_billed(self, temp_database):
         storage = temp_database
-        t1 = Ticket(id="T1", description="Unlinked task", archived=True)
+        t1 = Ticket(
+            id="T1", description="Done", deliverable_id="WP2a-D1",
+            archived=True, billed=True, billed_year=2026, billed_month=4,
+        )
+        storage.save_ticket(t1)
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T1", date=date(2026, 4, 1), hours=Decimal("4"),
+        ))
+        assert storage.get_current_bill_summary(**_bill_args()) == []
+
+    def test_spans_months(self, temp_database):
+        """Ticket with allocations across months bills the full total once."""
+        storage = temp_database
+        t1 = Ticket(id="T1", description="Span", deliverable_id="WP2a-D1", archived=True)
+        storage.save_ticket(t1)
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T1", date=date(2026, 3, 28), hours=Decimal("8"),
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T1", date=date(2026, 4, 5), hours=Decimal("5"),
+        ))
+
+        lines = storage.get_current_bill_summary(**_bill_args())
+        assert len(lines) == 1
+        assert lines[0].hours == Decimal("13.00")
+        # 13/2 = 6.5, ceiling = 7
+        assert lines[0].points == Decimal("7")
+
+    def test_unlinked(self, temp_database):
+        storage = temp_database
+        t1 = Ticket(id="T1", description="Unlinked", archived=True)
         storage.save_ticket(t1)
         storage.save_allocation(TicketAllocation(
             ticket_id="T1", date=date(2026, 4, 1), hours=Decimal("3"),
         ))
-
-        lines = storage.get_billing_summary_for_month(
-            2026, 4,
-            hours_per_point=Decimal("2"),
-            point_rate=Decimal("200"),
-            vat_rate=Decimal("0.20"),
-        )
+        lines = storage.get_current_bill_summary(**_bill_args())
         assert len(lines) == 1
         assert lines[0].deliverable_id is None
         assert lines[0].deliverable_title == "Unlinked"
 
-    def test_empty_month(self, temp_database):
-        """Test billing summary for month with no allocations."""
+    def test_empty(self, temp_database):
         storage = temp_database
-        lines = storage.get_billing_summary_for_month(
-            2026, 4,
-            hours_per_point=Decimal("2"),
-            point_rate=Decimal("200"),
-            vat_rate=Decimal("0.20"),
+        assert storage.get_current_bill_summary(**_bill_args()) == []
+
+    def test_contract_start_excludes_pre_contract_only_tickets(self, temp_database):
+        """Closed tickets with allocations only before contract_start are excluded."""
+        storage = temp_database
+        t = Ticket(id="OLD", description="o", deliverable_id="WP2a-D1", archived=True)
+        storage.save_ticket(t)
+        storage.save_allocation(TicketAllocation(
+            ticket_id="OLD", date=date(2026, 3, 15), hours=Decimal("4"),
+        ))
+
+        lines = storage.get_current_bill_summary(
+            **_bill_args(), contract_start=date(2026, 4, 1),
         )
         assert lines == []
+
+    def test_contract_start_only_counts_post_contract_hours(self, temp_database):
+        """Tickets spanning contract_start only bill the post-start hours."""
+        storage = temp_database
+        t = Ticket(id="SPAN", description="s", deliverable_id="WP2a-D1", archived=True)
+        storage.save_ticket(t)
+        # 8h pre-contract (already billed hourly), 5h in-contract
+        storage.save_allocation(TicketAllocation(
+            ticket_id="SPAN", date=date(2026, 3, 28), hours=Decimal("8"),
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="SPAN", date=date(2026, 4, 5), hours=Decimal("5"),
+        ))
+
+        lines = storage.get_current_bill_summary(
+            **_bill_args(), contract_start=date(2026, 4, 1),
+        )
+        assert len(lines) == 1
+        # Only the 5 April hours count: 5/2 = 2.5, ceiling = 3
+        assert lines[0].hours == Decimal("5.00")
+        assert lines[0].points == Decimal("3")
+
+
+class TestGetBillableTickets:
+    def test_returns_closed_unbilled_only(self, temp_database):
+        storage = temp_database
+        storage.save_ticket(Ticket(id="OPEN", description="o"))
+        storage.save_ticket(Ticket(id="CLOSED", description="c", archived=True))
+        storage.save_ticket(Ticket(
+            id="BILLED", description="b", archived=True,
+            billed=True, billed_year=2026, billed_month=3,
+        ))
+
+        billable = storage.get_billable_tickets()
+        assert {t.id for t in billable} == {"CLOSED"}
+
+
+_RATES = {
+    "hours_per_point": Decimal("2"),
+    "point_rate": Decimal("100"),
+    "vat_rate": Decimal("0.2"),
+}
+
+
+class TestFinaliseBill:
+    def test_marks_tickets_and_records_month(self, temp_database):
+        storage = temp_database
+        storage.save_ticket(Ticket(id="A", description="A", archived=True))
+        storage.save_ticket(Ticket(id="B", description="B", archived=True))
+        storage.save_ticket(Ticket(id="OPEN", description="O"))
+
+        billed_ids = storage.finalise_bill(2026, 4, **_RATES)
+        assert set(billed_ids) == {"A", "B"}
+
+        a = storage.get_ticket("A")
+        assert a is not None
+        assert a.billed is True
+        assert a.billed_year == 2026
+        assert a.billed_month == 4
+
+        # Open ticket untouched
+        o = storage.get_ticket("OPEN")
+        assert o is not None
+        assert o.billed is False
+
+        # Monthly billing record created
+        billing = storage.get_monthly_billing(2026, 4)
+        assert billing.finalised is True
+
+    def test_idempotent_on_already_billed(self, temp_database):
+        """Re-finalising doesn't disturb tickets already billed in another month."""
+        storage = temp_database
+        storage.save_ticket(Ticket(
+            id="OLD", description="Old", archived=True,
+            billed=True, billed_year=2026, billed_month=3,
+        ))
+        storage.save_ticket(Ticket(id="NEW", description="New", archived=True))
+
+        billed_ids = storage.finalise_bill(2026, 4, **_RATES)
+        assert billed_ids == ["NEW"]
+        # Old ticket retains its March billing
+        old = storage.get_ticket("OLD")
+        assert old is not None
+        assert old.billed_month == 3
+
+    def test_empty_finalise(self, temp_database):
+        storage = temp_database
+        assert storage.finalise_bill(2026, 4, **_RATES) == []
+        billing = storage.get_monthly_billing(2026, 4)
+        assert billing.finalised is True
+
+    def test_snapshots_bill_lines(self, temp_database):
+        """Finalisation captures the per-deliverable breakdown."""
+        storage = temp_database
+        storage.save_work_package(WorkPackage(id="WP1", title="WP1"))
+        storage.save_deliverable(Deliverable(
+            id="D1", title="Deliverable 1", work_package_id="WP1",
+        ))
+        storage.save_ticket(Ticket(
+            id="T1", description="t", archived=True, deliverable_id="D1",
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T1", date=date(2026, 4, 1), hours=Decimal("4"),
+        ))
+
+        storage.finalise_bill(2026, 4, **_RATES)
+
+        lines = storage.get_bill_lines(2026, 4)
+        assert len(lines) == 1
+        assert lines[0].deliverable_id == "D1"
+        assert lines[0].hours == Decimal("4.00")
+        assert lines[0].points == Decimal("2")
+        assert lines[0].amount_ex_vat == Decimal("200.00")
+        assert lines[0].amount_inc_vat == Decimal("240.00")
+
+    def test_snapshot_survives_later_allocation_edits(self, temp_database):
+        """The snapshot is the source of truth even if allocations change after."""
+        storage = temp_database
+        storage.save_work_package(WorkPackage(id="WP1", title="WP1"))
+        storage.save_deliverable(Deliverable(
+            id="D1", title="Deliverable 1", work_package_id="WP1",
+        ))
+        storage.save_ticket(Ticket(
+            id="T1", description="t", archived=True, deliverable_id="D1",
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T1", date=date(2026, 4, 1), hours=Decimal("4"),
+        ))
+        storage.finalise_bill(2026, 4, **_RATES)
+
+        # Edit the allocation post-finalisation
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T1", date=date(2026, 4, 1), hours=Decimal("10"),
+        ))
+
+        lines = storage.get_bill_lines(2026, 4)
+        assert len(lines) == 1
+        assert lines[0].hours == Decimal("4.00")
+        assert lines[0].points == Decimal("2")
+
+
+class TestUnfinaliseBill:
+    def test_clears_billed_flag_and_record(self, temp_database):
+        storage = temp_database
+        storage.save_ticket(Ticket(id="A", description="A", archived=True))
+        storage.finalise_bill(2026, 4, **_RATES)
+
+        storage.unfinalise_bill(2026, 4)
+        a = storage.get_ticket("A")
+        assert a is not None
+        assert a.billed is False
+        assert a.billed_year is None
+        assert a.billed_month is None
+        billing = storage.get_monthly_billing(2026, 4)
+        assert billing.finalised is False
+
+    def test_clears_bill_lines_snapshot(self, temp_database):
+        storage = temp_database
+        storage.save_work_package(WorkPackage(id="WP1", title="WP1"))
+        storage.save_deliverable(Deliverable(
+            id="D1", title="D1", work_package_id="WP1",
+        ))
+        storage.save_ticket(Ticket(
+            id="T1", description="t", archived=True, deliverable_id="D1",
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T1", date=date(2026, 4, 1), hours=Decimal("4"),
+        ))
+        storage.finalise_bill(2026, 4, **_RATES)
+        assert len(storage.get_bill_lines(2026, 4)) == 1
+
+        storage.unfinalise_bill(2026, 4)
+        assert storage.get_bill_lines(2026, 4) == []
+
+
+class TestUnarchiveClearsBilled:
+    def test_unarchive_clears_billed_state(self, temp_database):
+        storage = temp_database
+        storage.save_ticket(Ticket(
+            id="A", description="A", archived=True,
+            billed=True, billed_year=2026, billed_month=4,
+        ))
+
+        storage.unarchive_ticket("A")
+        a = storage.get_ticket("A")
+        assert a is not None
+        assert a.archived is False
+        assert a.billed is False
+        assert a.billed_year is None
+        assert a.billed_month is None
+
+
+class TestBilledPointsTotal:
+    def test_counts_only_billed_tickets(self, temp_database):
+        storage = temp_database
+        # Closed and billed
+        storage.save_ticket(Ticket(
+            id="DONE", description="d", archived=True,
+            billed=True, billed_year=2026, billed_month=4,
+        ))
+        # Closed but not billed
+        storage.save_ticket(Ticket(id="OWED", description="o", archived=True))
+        # Open
+        storage.save_ticket(Ticket(id="WIP", description="w"))
+
+        for tid in ("DONE", "OWED", "WIP"):
+            storage.save_allocation(TicketAllocation(
+                ticket_id=tid, date=date(2026, 4, 1), hours=Decimal("4"),
+            ))
+
+        # Only DONE counts: 4h / 2h per pt = 2 pts
+        assert storage.get_billed_points_total(Decimal("2")) == Decimal("2")
+
+    def test_filtered_up_to_month(self, temp_database):
+        storage = temp_database
+        storage.save_ticket(Ticket(
+            id="MAR", description="m", archived=True,
+            billed=True, billed_year=2026, billed_month=3,
+        ))
+        storage.save_ticket(Ticket(
+            id="MAY", description="m", archived=True,
+            billed=True, billed_year=2026, billed_month=5,
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="MAR", date=date(2026, 3, 1), hours=Decimal("4"),
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="MAY", date=date(2026, 5, 1), hours=Decimal("4"),
+        ))
+
+        # Up to April: only MAR (billed_month=3)
+        total = storage.get_billed_points_total(
+            Decimal("2"), up_to_year=2026, up_to_month=4,
+        )
+        assert total == Decimal("2")
+
+    def test_contract_start_excludes_pre_contract_hours(self, temp_database):
+        """Even on a billed ticket, pre-contract hours don't count."""
+        storage = temp_database
+        storage.save_ticket(Ticket(
+            id="SPAN", description="s", archived=True,
+            billed=True, billed_year=2026, billed_month=4,
+        ))
+        # Pre-contract hours
+        storage.save_allocation(TicketAllocation(
+            ticket_id="SPAN", date=date(2026, 3, 28), hours=Decimal("8"),
+        ))
+        # In-contract hours
+        storage.save_allocation(TicketAllocation(
+            ticket_id="SPAN", date=date(2026, 4, 5), hours=Decimal("4"),
+        ))
+
+        # Without contract_start: counts both = 12h / 2 = 6 pts
+        assert storage.get_billed_points_total(Decimal("2")) == Decimal("6")
+        # With contract_start: only 4h counts = 2 pts
+        total = storage.get_billed_points_total(
+            Decimal("2"), contract_start=date(2026, 4, 1),
+        )
+        assert total == Decimal("2")
+
+
+class TestFinalisedBillsHistory:
+    def test_get_finalised_bills_returns_sorted_periods(self, temp_database):
+        storage = temp_database
+        storage.save_monthly_billing(MonthlyBilling(2026, 4, finalised=True))
+        storage.save_monthly_billing(MonthlyBilling(2026, 2, finalised=True))
+        storage.save_monthly_billing(MonthlyBilling(2026, 3, finalised=False))
+        storage.save_monthly_billing(MonthlyBilling(2025, 12, finalised=True))
+
+        assert storage.get_finalised_bills() == [(2025, 12), (2026, 2), (2026, 4)]
+
+    def test_get_billed_tickets_for_period_filters_by_stamp(self, temp_database):
+        storage = temp_database
+        storage.save_ticket(Ticket(
+            id="APR1", description="a", archived=True,
+            billed=True, billed_year=2026, billed_month=4,
+        ))
+        storage.save_ticket(Ticket(
+            id="APR2", description="b", archived=True,
+            billed=True, billed_year=2026, billed_month=4,
+        ))
+        storage.save_ticket(Ticket(
+            id="MAY1", description="c", archived=True,
+            billed=True, billed_year=2026, billed_month=5,
+        ))
+        storage.save_ticket(Ticket(id="OPEN", description="o"))
+
+        tickets = storage.get_billed_tickets_for_period(2026, 4)
+        assert {t.id for t in tickets} == {"APR1", "APR2"}
+
+    def test_get_finalised_bill_summary_groups_by_deliverable(self, temp_database):
+        storage = temp_database
+        storage.save_work_package(WorkPackage(id="WP1", title="WP1"))
+        storage.save_deliverable(Deliverable(
+            id="D1", title="Deliverable 1", work_package_id="WP1",
+        ))
+        storage.save_ticket(Ticket(
+            id="T1", description="t", archived=True,
+            billed=True, billed_year=2026, billed_month=4,
+            deliverable_id="D1",
+        ))
+        storage.save_ticket(Ticket(
+            id="T2", description="t", archived=True,
+            billed=True, billed_year=2026, billed_month=5,
+            deliverable_id="D1",
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T1", date=date(2026, 4, 1), hours=Decimal("4"),
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="T2", date=date(2026, 5, 1), hours=Decimal("8"),
+        ))
+
+        lines = storage.get_finalised_bill_summary(
+            2026, 4,
+            hours_per_point=Decimal("2"),
+            point_rate=Decimal("100"),
+            vat_rate=Decimal("0.2"),
+        )
+        assert len(lines) == 1
+        assert lines[0].deliverable_id == "D1"
+        assert lines[0].hours == Decimal("4.00")
+        assert lines[0].points == Decimal("2")
+        assert lines[0].amount_ex_vat == Decimal("200.00")
+        assert lines[0].amount_inc_vat == Decimal("240.00")
+
+
+class TestCarryoverTickets:
+    def test_returns_unbilled_prior_only(self, temp_database):
+        storage = temp_database
+        # A: only April allocs - excluded (already shown in April view)
+        storage.save_ticket(Ticket(id="A", description="a"))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="A", date=date(2026, 4, 1), hours=Decimal("2"),
+        ))
+        # B: March allocs only, unbilled - included when viewing April
+        storage.save_ticket(Ticket(id="B", description="b"))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="B", date=date(2026, 3, 15), hours=Decimal("3"),
+        ))
+        # C: March allocs but billed - excluded
+        storage.save_ticket(Ticket(
+            id="C", description="c", archived=True,
+            billed=True, billed_year=2026, billed_month=3,
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="C", date=date(2026, 3, 20), hours=Decimal("4"),
+        ))
+        # D: March + April allocs - excluded (already shown)
+        storage.save_ticket(Ticket(id="D", description="d"))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="D", date=date(2026, 3, 10), hours=Decimal("1"),
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="D", date=date(2026, 4, 5), hours=Decimal("1"),
+        ))
+
+        carryover = storage.get_carryover_tickets(2026, 4)
+        assert {t.id for t, _ in carryover} == {"B"}
+        b_ticket, b_hours = carryover[0]
+        assert b_ticket.id == "B"
+        assert b_hours == Decimal("3.00")
+
+    def test_contract_start_filters_pre_contract_only(self, temp_database):
+        """Tickets whose only prior work is pre-contract are not carryover."""
+        storage = temp_database
+        # Only Feb allocs (pre-contract) - shouldn't appear when viewing May
+        storage.save_ticket(Ticket(id="OLD", description="o"))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="OLD", date=date(2026, 2, 10), hours=Decimal("4"),
+        ))
+
+        carryover = storage.get_carryover_tickets(
+            2026, 5, contract_start=date(2026, 4, 1),
+        )
+        assert carryover == []
+
+
+class TestMonthlyPointsBreakdown:
+    def test_three_categories(self, temp_database):
+        storage = temp_database
+        # Billed
+        storage.save_ticket(Ticket(
+            id="BD", description="b", archived=True,
+            billed=True, billed_year=2026, billed_month=4,
+        ))
+        # Closed but unbilled
+        storage.save_ticket(Ticket(id="CL", description="c", archived=True))
+        # Open
+        storage.save_ticket(Ticket(id="OP", description="o"))
+
+        for tid in ("BD", "CL", "OP"):
+            storage.save_allocation(TicketAllocation(
+                ticket_id=tid, date=date(2026, 4, 1), hours=Decimal("4"),
+            ))
+
+        billed, billable, speculative = storage.get_monthly_points_breakdown(
+            2026, 4, Decimal("2"),
+        )
+        assert billed == 2
+        assert billable == 2
+        assert speculative == 2
 
 
 class TestContractConfig:
@@ -911,7 +1334,7 @@ class TestContractConfig:
         config = storage.get_config()
         assert config.contract_start == date(2026, 4, 1)
         assert config.contract_end == date(2027, 3, 31)
-        assert config.annual_max_points == 825
+        assert config.annual_max_points == 960
 
     def test_contract_config_round_trip(self, temp_database):
         """Test saving and loading contract config."""

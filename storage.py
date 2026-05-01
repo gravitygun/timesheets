@@ -101,6 +101,21 @@ def init_db():
             PRIMARY KEY (year, month)
         );
 
+        CREATE TABLE IF NOT EXISTS bill_lines (
+            year INTEGER NOT NULL,
+            month INTEGER NOT NULL,
+            line_no INTEGER NOT NULL,
+            deliverable_id TEXT,
+            deliverable_title TEXT NOT NULL,
+            work_package_id TEXT NOT NULL DEFAULT '',
+            work_package_title TEXT NOT NULL DEFAULT '',
+            hours TEXT NOT NULL,
+            points INTEGER NOT NULL,
+            amount_ex_vat TEXT NOT NULL,
+            amount_inc_vat TEXT NOT NULL,
+            PRIMARY KEY (year, month, line_no)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_entries_date ON time_entries(date);
         CREATE INDEX IF NOT EXISTS idx_allocations_date ON ticket_allocations(date);
         CREATE INDEX IF NOT EXISTS idx_allocations_ticket ON ticket_allocations(ticket_id);
@@ -135,6 +150,20 @@ def init_db():
             "ALTER TABLE tickets ADD COLUMN deliverable_id TEXT"
         )
 
+    # Migration: Add billed flag and audit columns
+    if "billed" not in ticket_columns:
+        conn.execute(
+            "ALTER TABLE tickets ADD COLUMN billed INTEGER DEFAULT 0"
+        )
+    if "billed_year" not in ticket_columns:
+        conn.execute(
+            "ALTER TABLE tickets ADD COLUMN billed_year INTEGER"
+        )
+    if "billed_month" not in ticket_columns:
+        conn.execute(
+            "ALTER TABLE tickets ADD COLUMN billed_month INTEGER"
+        )
+
     # Seed points_start_date config if not yet set
     row = conn.execute(
         "SELECT value FROM config WHERE key = 'points_start_date'"
@@ -149,7 +178,7 @@ def init_db():
     for key, value in [
         ("contract_start", "2026-04-01"),
         ("contract_end", "2027-03-31"),
-        ("annual_max_points", "825"),
+        ("annual_max_points", "960"),
     ]:
         existing = conn.execute(
             "SELECT value FROM config WHERE key = ?", (key,)
@@ -169,6 +198,15 @@ def init_db():
             "UPDATE config SET value = '200' WHERE key = 'point_rate'"
         )
 
+    # Update annual_max_points from 825 to 960 (contract amendment)
+    annual_row = conn.execute(
+        "SELECT value FROM config WHERE key = 'annual_max_points'"
+    ).fetchone()
+    if annual_row and annual_row["value"] == "825":
+        conn.execute(
+            "UPDATE config SET value = '960' WHERE key = 'annual_max_points'"
+        )
+
     # Seed work packages and deliverables if empty
     wp_count = conn.execute("SELECT COUNT(*) as c FROM work_packages").fetchone()
     if wp_count["c"] == 0:
@@ -183,6 +221,9 @@ def init_db():
     ).fetchone()
     if budget_count["c"] == 0:
         _seed_monthly_point_budgets(conn)
+    else:
+        # Migration: bump existing monthly budgets to new contract values
+        _update_monthly_point_budgets(conn)
 
     conn.commit()
     conn.close()
@@ -292,15 +333,31 @@ def _backfill_inactive_deliverables(conn: sqlite3.Connection) -> None:
 def _seed_monthly_point_budgets(conn: sqlite3.Connection) -> None:
     """Seed monthly point budgets from the contract fee schedule."""
     budgets = [
-        (2026, 4, 68), (2026, 5, 68), (2026, 6, 68),
-        (2026, 7, 69), (2026, 8, 69), (2026, 9, 69),
-        (2026, 10, 69), (2026, 11, 69), (2026, 12, 69),
-        (2027, 1, 69), (2027, 2, 69), (2027, 3, 69),
+        (2026, 4, 80), (2026, 5, 80), (2026, 6, 80),
+        (2026, 7, 80), (2026, 8, 80), (2026, 9, 80),
+        (2026, 10, 80), (2026, 11, 80), (2026, 12, 80),
+        (2027, 1, 80), (2027, 2, 80), (2027, 3, 80),
     ]
     for year, month, points in budgets:
         conn.execute(
             "INSERT INTO monthly_point_budgets (year, month, max_points) "
             "VALUES (?, ?, ?)",
+            (year, month, points),
+        )
+
+
+def _update_monthly_point_budgets(conn: sqlite3.Connection) -> None:
+    """Update existing monthly budgets to new contract values (80 pts/month)."""
+    new_budgets = [
+        (2026, 4, 80), (2026, 5, 80), (2026, 6, 80),
+        (2026, 7, 80), (2026, 8, 80), (2026, 9, 80),
+        (2026, 10, 80), (2026, 11, 80), (2026, 12, 80),
+        (2027, 1, 80), (2027, 2, 80), (2027, 3, 80),
+    ]
+    for year, month, points in new_budgets:
+        conn.execute(
+            "INSERT OR REPLACE INTO monthly_point_budgets "
+            "(year, month, max_points) VALUES (?, ?, ?)",
             (year, month, points),
         )
 
@@ -533,6 +590,9 @@ def _row_to_ticket(row: sqlite3.Row) -> Ticket:
         created_at=date.fromisoformat(row["created_at"]) if row["created_at"] else None,
         points_entered=bool(row["points_entered"]) if "points_entered" in keys else False,
         deliverable_id=row["deliverable_id"] if "deliverable_id" in keys else None,
+        billed=bool(row["billed"]) if "billed" in keys else False,
+        billed_year=row["billed_year"] if "billed_year" in keys else None,
+        billed_month=row["billed_month"] if "billed_month" in keys else None,
     )
 
 
@@ -543,8 +603,9 @@ def save_ticket(ticket: Ticket) -> None:
     conn.execute(
         """
         INSERT OR REPLACE INTO tickets
-            (id, description, archived, created_at, points_entered, deliverable_id)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (id, description, archived, created_at, points_entered,
+             deliverable_id, billed, billed_year, billed_month)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ticket.id,
@@ -553,6 +614,9 @@ def save_ticket(ticket: Ticket) -> None:
             created_at.isoformat(),
             int(ticket.points_entered),
             ticket.deliverable_id,
+            int(ticket.billed),
+            ticket.billed_year,
+            ticket.billed_month,
         ),
     )
     conn.commit()
@@ -641,9 +705,17 @@ def archive_ticket(ticket_id: str) -> None:
 
 
 def unarchive_ticket(ticket_id: str) -> None:
-    """Unarchive a ticket."""
+    """Reopen a closed ticket and clear any billed state.
+
+    Reopening implies the work isn't actually finished, so any prior
+    billing claim must be retracted.
+    """
     conn = get_connection()
-    conn.execute("UPDATE tickets SET archived = 0 WHERE id = ?", (ticket_id,))
+    conn.execute(
+        "UPDATE tickets SET archived = 0, billed = 0, "
+        "billed_year = NULL, billed_month = NULL WHERE id = ?",
+        (ticket_id,),
+    )
     conn.commit()
     conn.close()
 
@@ -1035,25 +1107,54 @@ class DeliverableBillingLine:
     amount_inc_vat: Decimal
 
 
-def get_billing_summary_for_month(
-    year: int,
-    month: int,
+def get_billable_tickets(
+    contract_start: date | None = None,
+) -> list[Ticket]:
+    """Get all tickets that are closed but not yet billed.
+
+    If contract_start is given, only returns tickets that have at least
+    one allocation on or after that date - so closed tickets whose
+    hours pre-date the points contract (and were thus billed hourly)
+    are excluded from the points-billing list.
+    """
+    conn = get_connection()
+    if contract_start is not None:
+        rows = conn.execute(
+            """
+            SELECT t.* FROM tickets t
+            WHERE t.archived = 1 AND t.billed = 0
+              AND EXISTS (
+                  SELECT 1 FROM ticket_allocations ta
+                  WHERE ta.ticket_id = t.id AND ta.date >= ?
+              )
+            ORDER BY t.id
+            """,
+            (contract_start.isoformat(),),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM tickets WHERE archived = 1 AND billed = 0 ORDER BY id",
+        ).fetchall()
+    conn.close()
+    return [_row_to_ticket(row) for row in rows]
+
+
+def get_current_bill_summary(
     hours_per_point: Decimal,
     point_rate: Decimal,
     vat_rate: Decimal,
+    contract_start: date | None = None,
 ) -> list[DeliverableBillingLine]:
-    """Get billing breakdown by deliverable for a month.
+    """Get billing breakdown by deliverable for all closed-and-unbilled tickets.
 
     Returns a list of DeliverableBillingLine, one per deliverable
-    (plus one for unlinked allocations if any).
+    (plus one for unlinked allocations if any). Sums allocations on
+    each billable ticket. If contract_start is given, only counts
+    allocations on or after that date - so pre-points-system hours
+    (already billed hourly) don't appear here.
     """
-    from calendar import monthrange
-
-    start = date(year, month, 1)
-    end = date(year, month, monthrange(year, month)[1])
     conn = get_connection()
-    rows = conn.execute(
-        """
+    sql = """
         SELECT
             t.deliverable_id,
             d.title as deliverable_title,
@@ -1064,13 +1165,18 @@ def get_billing_summary_for_month(
         JOIN tickets t ON ta.ticket_id = t.id
         LEFT JOIN deliverables d ON t.deliverable_id = d.id
         LEFT JOIN work_packages wp ON d.work_package_id = wp.id
-        WHERE ta.date >= ? AND ta.date <= ?
-            AND t.archived = 1
+        WHERE t.archived = 1 AND t.billed = 0
+    """
+    params: list[object] = []
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    sql += """
         GROUP BY t.deliverable_id
+        HAVING total_hours > 0
         ORDER BY d.work_package_id, t.deliverable_id
-        """,
-        (start.isoformat(), end.isoformat()),
-    ).fetchall()
+    """
+    rows = conn.execute(sql, params).fetchall()
     conn.close()
 
     lines: list[DeliverableBillingLine] = []
@@ -1092,27 +1198,123 @@ def get_billing_summary_for_month(
     return lines
 
 
-def get_year_to_date_points(
-    contract_start: date,
-    up_to_year: int,
-    up_to_month: int,
-    hours_per_point: Decimal,
-) -> Decimal:
-    """Get total points used from contract start up to end of a given month."""
-    from calendar import monthrange
-
-    end = date(up_to_year, up_to_month, monthrange(up_to_year, up_to_month)[1])
+def get_finalised_bills() -> list[tuple[int, int]]:
+    """Return finalised bill periods as (year, month), oldest first."""
     conn = get_connection()
-    row = conn.execute(
-        """
+    rows = conn.execute(
+        "SELECT year, month FROM monthly_billing WHERE finalised = 1 "
+        "ORDER BY year, month",
+    ).fetchall()
+    conn.close()
+    return [(row["year"], row["month"]) for row in rows]
+
+
+def get_billed_tickets_for_period(year: int, month: int) -> list[Ticket]:
+    """Get all tickets that were billed in the given period."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM tickets WHERE billed = 1 "
+        "AND billed_year = ? AND billed_month = ? ORDER BY id",
+        (year, month),
+    ).fetchall()
+    conn.close()
+    return [_row_to_ticket(row) for row in rows]
+
+
+def get_finalised_bill_summary(
+    year: int,
+    month: int,
+    hours_per_point: Decimal,
+    point_rate: Decimal,
+    vat_rate: Decimal,
+    contract_start: date | None = None,
+) -> list[DeliverableBillingLine]:
+    """Get billing breakdown by deliverable for a finalised bill period.
+
+    Mirrors get_current_bill_summary but selects tickets stamped with the
+    given billed_year/billed_month rather than the unbilled set. Used as
+    a derivation fallback when no bill_lines snapshot exists for the
+    period; respects contract_start so pre-points-system hours on a
+    billed ticket don't get double-counted.
+    """
+    conn = get_connection()
+    sql = """
+        SELECT
+            t.deliverable_id,
+            d.title as deliverable_title,
+            d.work_package_id,
+            wp.title as work_package_title,
+            SUM(CAST(ta.hours AS REAL)) as total_hours
+        FROM ticket_allocations ta
+        JOIN tickets t ON ta.ticket_id = t.id
+        LEFT JOIN deliverables d ON t.deliverable_id = d.id
+        LEFT JOIN work_packages wp ON d.work_package_id = wp.id
+        WHERE t.archived = 1 AND t.billed = 1
+          AND t.billed_year = ? AND t.billed_month = ?
+    """
+    params: list[object] = [year, month]
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    sql += """
+        GROUP BY t.deliverable_id
+        HAVING total_hours > 0
+        ORDER BY d.work_package_id, t.deliverable_id
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+
+    lines: list[DeliverableBillingLine] = []
+    for row in rows:
+        hours = Decimal(str(row["total_hours"])).quantize(Decimal("0.01"))
+        points = (hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING)
+        amount_ex = (points * point_rate).quantize(Decimal("0.01"))
+        amount_inc = (amount_ex * (1 + vat_rate)).quantize(Decimal("0.01"))
+        lines.append(DeliverableBillingLine(
+            deliverable_id=row["deliverable_id"],
+            deliverable_title=row["deliverable_title"] or "Unlinked",
+            work_package_id=row["work_package_id"] or "",
+            work_package_title=row["work_package_title"] or "",
+            hours=hours,
+            points=points,
+            amount_ex_vat=amount_ex,
+            amount_inc_vat=amount_inc,
+        ))
+    return lines
+
+
+def get_billed_points_total(
+    hours_per_point: Decimal,
+    up_to_year: int | None = None,
+    up_to_month: int | None = None,
+    contract_start: date | None = None,
+) -> Decimal:
+    """Get total points already billed (closed + billed tickets).
+
+    Optionally filter to bills marked with billed_year/billed_month
+    on or before the given year/month. If contract_start is given,
+    only counts allocations on or after that date - so any hours that
+    pre-date the points contract (billed under the prior hourly scheme)
+    don't pollute the points-system YTD totals.
+    """
+    conn = get_connection()
+    sql = """
         SELECT COALESCE(SUM(CAST(ta.hours AS REAL)), 0) as total
         FROM ticket_allocations ta
         JOIN tickets t ON ta.ticket_id = t.id
-        WHERE ta.date >= ? AND ta.date <= ?
-            AND t.archived = 1
-        """,
-        (contract_start.isoformat(), end.isoformat()),
-    ).fetchone()
+        WHERE t.billed = 1
+    """
+    params: list[object] = []
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    if up_to_year is not None and up_to_month is not None:
+        sql += (
+            " AND (t.billed_year < ? OR "
+            "(t.billed_year = ? AND t.billed_month <= ?))"
+        )
+        params.extend([up_to_year, up_to_year, up_to_month])
+    row = conn.execute(sql, params).fetchone()
     conn.close()
     total_hours = Decimal(str(row["total"])).quantize(Decimal("0.01"))
     return (total_hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING)
@@ -1122,11 +1324,13 @@ def get_monthly_points_breakdown(
     year: int,
     month: int,
     hours_per_point: Decimal,
-) -> tuple[int, int]:
-    """Get billable and speculative points for a single month.
+) -> tuple[int, int, int]:
+    """Get points breakdown for work done in a single month.
 
-    Billable = archived tickets, speculative = non-archived.
-    Returns (billable_points, speculative_points).
+    Returns (billed_points, billable_points, speculative_points):
+    - billed: closed and already billed
+    - billable: closed but not yet billed
+    - speculative: still open
     """
     from calendar import monthrange
 
@@ -1135,27 +1339,320 @@ def get_monthly_points_breakdown(
     conn = get_connection()
     rows = conn.execute(
         """
-        SELECT t.archived, ta.ticket_id,
+        SELECT t.archived, t.billed, ta.ticket_id,
                SUM(CAST(ta.hours AS REAL)) as total
         FROM ticket_allocations ta
         JOIN tickets t ON ta.ticket_id = t.id
         WHERE ta.date >= ? AND ta.date <= ?
-        GROUP BY ta.ticket_id, t.archived
+        GROUP BY ta.ticket_id, t.archived, t.billed
         """,
         (start.isoformat(), end.isoformat()),
     ).fetchall()
     conn.close()
 
+    billed = 0
     billable = 0
     speculative = 0
     for row in rows:
         hours = Decimal(str(row["total"]))
         pts = int((hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING))
-        if row["archived"]:
+        if row["archived"] and row["billed"]:
+            billed += pts
+        elif row["archived"]:
             billable += pts
         else:
             speculative += pts
-    return billable, speculative
+    return billed, billable, speculative
+
+
+def get_points_by_status(
+    hours_per_point: Decimal,
+    contract_start: date | None = None,
+) -> tuple[int, int, int]:
+    """Total points by status: (billed, billable, speculative).
+
+    Hours are summed per (deliverable, status) bucket and rounded per
+    bucket - matching the per-deliverable rounding used in the billing
+    view. This is the truthful billing figure and avoids the inflation
+    you get when you round per ticket and then sum.
+    """
+    conn = get_connection()
+    sql = """
+        SELECT
+            t.deliverable_id,
+            t.archived,
+            t.billed,
+            SUM(CAST(ta.hours AS REAL)) as total_hours
+        FROM ticket_allocations ta
+        JOIN tickets t ON ta.ticket_id = t.id
+        WHERE 1=1
+    """
+    params: list[object] = []
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    sql += " GROUP BY t.deliverable_id, t.archived, t.billed"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+
+    billed = 0
+    billable = 0
+    speculative = 0
+    for row in rows:
+        hours = Decimal(str(row["total_hours"]))
+        pts = int((hours / hours_per_point).to_integral_value(
+            rounding=ROUND_CEILING,
+        ))
+        if row["archived"] and row["billed"]:
+            billed += pts
+        elif row["archived"]:
+            billable += pts
+        else:
+            speculative += pts
+    return billed, billable, speculative
+
+
+def get_carryover_tickets(
+    year: int, month: int,
+    contract_start: date | None = None,
+) -> list[tuple[Ticket, Decimal]]:
+    """Get unbilled tickets with allocations strictly before the given month.
+
+    Excludes tickets that already have allocations in the given month
+    (those are already shown in the main allocations list). Returns
+    each ticket paired with its allocated hours total. If contract_start
+    is given, only counts allocations on or after that date - so
+    tickets with only pre-points-system work (already billed hourly)
+    don't appear as carryover.
+    """
+    from calendar import monthrange
+
+    month_start = date(year, month, 1).isoformat()
+    month_end = date(year, month, monthrange(year, month)[1]).isoformat()
+
+    conn = get_connection()
+    sql = """
+        SELECT t.*,
+               COALESCE(SUM(CAST(ta.hours AS REAL)), 0) as lifetime_hours
+        FROM tickets t
+        JOIN ticket_allocations ta ON ta.ticket_id = t.id
+        WHERE t.billed = 0
+          AND ta.date < ?
+    """
+    params: list[object] = [month_start]
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    sql += """
+          AND NOT EXISTS (
+              SELECT 1 FROM ticket_allocations ta2
+              WHERE ta2.ticket_id = t.id
+                AND ta2.date >= ? AND ta2.date <= ?
+          )
+        GROUP BY t.id
+        HAVING lifetime_hours > 0
+        ORDER BY t.id
+    """
+    params.extend([month_start, month_end])
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+
+    return [
+        (
+            _row_to_ticket(row),
+            Decimal(str(row["lifetime_hours"])).quantize(Decimal("0.01")),
+        )
+        for row in rows
+    ]
+
+
+def _compute_current_bill_lines(
+    conn: sqlite3.Connection,
+    hours_per_point: Decimal,
+    point_rate: Decimal,
+    vat_rate: Decimal,
+    contract_start: date | None,
+) -> list[DeliverableBillingLine]:
+    """Compute current bill lines using an open connection (in-tx safe)."""
+    sql = """
+        SELECT
+            t.deliverable_id,
+            d.title as deliverable_title,
+            d.work_package_id,
+            wp.title as work_package_title,
+            SUM(CAST(ta.hours AS REAL)) as total_hours
+        FROM ticket_allocations ta
+        JOIN tickets t ON ta.ticket_id = t.id
+        LEFT JOIN deliverables d ON t.deliverable_id = d.id
+        LEFT JOIN work_packages wp ON d.work_package_id = wp.id
+        WHERE t.archived = 1 AND t.billed = 0
+    """
+    params: list[object] = []
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    sql += """
+        GROUP BY t.deliverable_id
+        HAVING total_hours > 0
+        ORDER BY d.work_package_id, t.deliverable_id
+    """
+    rows = conn.execute(sql, params).fetchall()
+    lines: list[DeliverableBillingLine] = []
+    for row in rows:
+        hours = Decimal(str(row["total_hours"])).quantize(Decimal("0.01"))
+        points = (hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING)
+        amount_ex = (points * point_rate).quantize(Decimal("0.01"))
+        amount_inc = (amount_ex * (1 + vat_rate)).quantize(Decimal("0.01"))
+        lines.append(DeliverableBillingLine(
+            deliverable_id=row["deliverable_id"],
+            deliverable_title=row["deliverable_title"] or "Unlinked",
+            work_package_id=row["work_package_id"] or "",
+            work_package_title=row["work_package_title"] or "",
+            hours=hours,
+            points=points,
+            amount_ex_vat=amount_ex,
+            amount_inc_vat=amount_inc,
+        ))
+    return lines
+
+
+def finalise_bill(
+    year: int, month: int,
+    hours_per_point: Decimal,
+    point_rate: Decimal,
+    vat_rate: Decimal,
+    contract_start: date | None = None,
+) -> list[str]:
+    """Mark all currently-billable tickets as billed for the given month.
+
+    Atomic: computes the bill lines from current state, marks tickets,
+    saves the monthly_billing record, and snapshots the bill_lines, all
+    in one transaction. Returns the list of ticket IDs that were billed.
+    The snapshot lets the historical view show truth even if allocations
+    drift later.
+    """
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        # Snapshot the bill lines from current state BEFORE flipping flags.
+        lines = _compute_current_bill_lines(
+            conn, hours_per_point, point_rate, vat_rate, contract_start,
+        )
+        if contract_start is not None:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tickets t
+                WHERE t.archived = 1 AND t.billed = 0
+                  AND EXISTS (
+                      SELECT 1 FROM ticket_allocations ta
+                      WHERE ta.ticket_id = t.id AND ta.date >= ?
+                  )
+                """,
+                (contract_start.isoformat(),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id FROM tickets WHERE archived = 1 AND billed = 0",
+            ).fetchall()
+        ticket_ids = [row["id"] for row in rows]
+        if ticket_ids:
+            placeholders = ",".join("?" * len(ticket_ids))
+            conn.execute(
+                f"UPDATE tickets SET billed = 1, billed_year = ?, "
+                f"billed_month = ? WHERE id IN ({placeholders}) "
+                f"AND archived = 1 AND billed = 0",
+                [year, month, *ticket_ids],
+            )
+        conn.execute(
+            "INSERT OR REPLACE INTO monthly_billing "
+            "(year, month, finalised) VALUES (?, ?, 1)",
+            (year, month),
+        )
+        # Replace any existing snapshot for this period (e.g. re-finalisation).
+        conn.execute(
+            "DELETE FROM bill_lines WHERE year = ? AND month = ?",
+            (year, month),
+        )
+        for i, line in enumerate(lines):
+            conn.execute(
+                "INSERT INTO bill_lines "
+                "(year, month, line_no, deliverable_id, deliverable_title, "
+                " work_package_id, work_package_title, hours, points, "
+                " amount_ex_vat, amount_inc_vat) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    year, month, i,
+                    line.deliverable_id,
+                    line.deliverable_title,
+                    line.work_package_id,
+                    line.work_package_title,
+                    str(line.hours),
+                    int(line.points),
+                    str(line.amount_ex_vat),
+                    str(line.amount_inc_vat),
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return ticket_ids
+
+
+def unfinalise_bill(year: int, month: int) -> None:
+    """Reverse a bill finalisation - clear billed marks, record, and snapshot."""
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE tickets SET billed = 0, billed_year = NULL, "
+            "billed_month = NULL WHERE billed_year = ? AND billed_month = ?",
+            (year, month),
+        )
+        conn.execute(
+            "UPDATE monthly_billing SET finalised = 0 "
+            "WHERE year = ? AND month = ?",
+            (year, month),
+        )
+        conn.execute(
+            "DELETE FROM bill_lines WHERE year = ? AND month = ?",
+            (year, month),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_bill_lines(year: int, month: int) -> list[DeliverableBillingLine]:
+    """Return snapshotted bill lines for a finalised period.
+
+    Returns an empty list if no snapshot exists (legacy/pre-snapshot bills).
+    Callers can detect this and fall back to derivation.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM bill_lines WHERE year = ? AND month = ? ORDER BY line_no",
+        (year, month),
+    ).fetchall()
+    conn.close()
+    return [
+        DeliverableBillingLine(
+            deliverable_id=row["deliverable_id"],
+            deliverable_title=row["deliverable_title"],
+            work_package_id=row["work_package_id"],
+            work_package_title=row["work_package_title"],
+            hours=Decimal(row["hours"]),
+            points=Decimal(row["points"]),
+            amount_ex_vat=Decimal(row["amount_ex_vat"]),
+            amount_inc_vat=Decimal(row["amount_inc_vat"]),
+        )
+        for row in rows
+    ]
 
 
 def get_cumulative_point_budget(

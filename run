@@ -1,0 +1,95 @@
+#!/bin/bash
+#
+# run — start a timesheets work session: pull, run the app/API, push on exit.
+#
+# Usage:
+#   ./run app           Pull, launch the TUI, push on exit
+#   ./run api           Pull, launch the HTTP API, push on exit
+#   ./run both          Pull, launch API in background + TUI in foreground,
+#                       kill API on TUI exit, push on exit
+#
+# On a clean exit (including Ctrl-C in the TUI), the trap pushes the current
+# DB state. On SIGKILL or a crash, no push happens — run './sync.sh push'
+# manually after.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
+red() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+
+API_PID=
+PUSHED=0
+
+push_on_exit() {
+  if [[ "${PUSHED}" == "1" ]]; then
+    return
+  fi
+  PUSHED=1
+
+  if [[ -n "${API_PID}" ]] && kill -0 "${API_PID}" 2>/dev/null; then
+    yellow "Stopping API (pid ${API_PID})…"
+    kill "${API_PID}" 2>/dev/null || true
+    wait "${API_PID}" 2>/dev/null || true
+  fi
+
+  echo
+  if "${SCRIPT_DIR}/sync.sh" push; then
+    :
+  else
+    red "Push failed. Run './sync.sh push' manually when back online."
+  fi
+}
+
+run_app() {
+  "${SCRIPT_DIR}/sync.sh" pull
+  trap push_on_exit EXIT
+  python "${SCRIPT_DIR}/app.py"
+}
+
+run_api() {
+  "${SCRIPT_DIR}/sync.sh" pull
+  trap push_on_exit EXIT
+  "${SCRIPT_DIR}/run_api.sh"
+}
+
+run_both() {
+  "${SCRIPT_DIR}/sync.sh" pull
+  trap push_on_exit EXIT
+
+  yellow "Starting API in background…"
+  "${SCRIPT_DIR}/run_api.sh" &
+  API_PID=$!
+  sleep 1
+
+  if ! kill -0 "${API_PID}" 2>/dev/null; then
+    red "API failed to start."
+    exit 1
+  fi
+
+  green "API running (pid ${API_PID}). Launching TUI."
+  python "${SCRIPT_DIR}/app.py"
+}
+
+main() {
+  local mode=${1:-}
+  case "${mode}" in
+    app) run_app ;;
+    api) run_api ;;
+    both) run_both ;;
+    *)
+      cat <<EOF
+Usage: $(basename "$0") <app|api|both>
+
+  app    Launch the TUI; pull before, push after.
+  api    Launch the HTTP API; pull before, push after.
+  both   API in background + TUI in foreground; push when TUI exits.
+EOF
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

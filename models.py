@@ -53,7 +53,7 @@ class Config:
     points_start_date: date | None = None
     contract_start: date | None = None
     contract_end: date | None = None
-    annual_max_points: int = 825
+    annual_max_points: int = 960
 
 
 @dataclass
@@ -66,6 +66,9 @@ class Ticket:
     created_at: date | None = None
     points_entered: bool = False
     deliverable_id: str | None = None
+    billed: bool = False
+    billed_year: int | None = None
+    billed_month: int | None = None
 
 
 @dataclass
