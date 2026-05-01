@@ -103,10 +103,18 @@ cmd_pull() {
 
 cmd_push() {
   require_data_repo
-  local force=${1:-}
+  local force_running=0
+  local allow_shrink=0
+  for arg in "$@"; do
+    case "${arg}" in
+      --force-with-running) force_running=1 ;;
+      --allow-shrink)       allow_shrink=1 ;;
+      *) red "Unknown flag: ${arg}"; exit 1 ;;
+    esac
+  done
 
   if processes_running; then
-    if [[ "${force}" == "--force-with-running" ]]; then
+    if [[ "${force_running}" == "1" ]]; then
       yellow "Pushing while processes are running (forced)."
     else
       red "timesheets app/API still running. Quit it first."
@@ -115,7 +123,28 @@ cmd_push() {
     fi
   fi
 
-  dump_db_to "${DUMP_FILE}"
+  # Dump to a staging path first so we can sanity-check before overwriting.
+  local staged
+  staged=$(mktemp)
+  dump_db_to "${staged}"
+
+  if [[ -f "${DUMP_FILE}" && "${allow_shrink}" == "0" ]]; then
+    local new_lines existing_lines
+    new_lines=$(wc -l <"${staged}")
+    existing_lines=$(wc -l <"${DUMP_FILE}")
+    # Refuse if the new dump is less than half the size of what's there.
+    # Catches accidents like dumping a stale/empty DB after a TIMESHEET_DB
+    # mix-up. Use --allow-shrink to override (e.g. legitimate mass-deletion).
+    if (( new_lines * 2 < existing_lines )); then
+      red "Refusing to push: new dump (${new_lines} lines) is less than half"
+      red "the existing dump (${existing_lines} lines) — looks like a wrong DB."
+      red "Live DB: ${DB_PATH}"
+      red "Override with: ./sync.sh push --allow-shrink"
+      rm -f "${staged}"
+      exit 1
+    fi
+  fi
+  mv "${staged}" "${DUMP_FILE}"
 
   cd "${DATA_REPO}"
   if git diff --quiet; then
