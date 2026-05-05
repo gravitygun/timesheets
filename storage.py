@@ -22,7 +22,7 @@ def _get_db_path() -> Path:
     """Get database path from environment variable or default location."""
     if env_path := os.environ.get("TIMESHEET_DB"):
         return Path(env_path)
-    return Path(__file__).parent / "data" / "timesheet.db"
+    return Path.home() / "Library" / "Application Support" / "timesheets" / "timesheet.db"
 
 
 DB_PATH = _get_db_path()

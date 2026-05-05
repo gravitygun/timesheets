@@ -39,33 +39,42 @@ A terminal-based timesheet application for tracking work hours, built with
    pip install -r requirements.txt
    ```
 
-5. Configure the database location (recommended: use a cloud-synced folder):
+5. (Optional, multi-machine only) Clone the data repo for cross-machine
+   sync. See [Multi-Machine Setup](#multi-machine-setup) below for what
+   this is and why iCloud isn't used.
 
    ```bash
-   # Create the directory in iCloud Drive
-   mkdir -p ~/Library/Mobile\ Documents/com~apple~CloudDocs/timesheets
-
-   # Add to your shell profile (~/.zshrc)
-   DB_PATH='$HOME/Library/Mobile Documents/com~apple~CloudDocs/timesheets'
-   echo "export TIMESHEET_DB=\"$DB_PATH/timesheet.db\"" >> ~/.zshrc
-
-   # Reload your shell
-   source ~/.zshrc
+   git clone git@github.com:gravitygun/timesheets-data.git ~/.timesheets-data
    ```
 
-   If `TIMESHEET_DB` is not set, the app uses `data/timesheet.db` in the
-   project directory.
+   The app stores its database at
+   `~/Library/Application Support/timesheets/timesheet.db` by default. Do
+   **not** set `TIMESHEET_DB` to a cloud-synced path — iCloud has corrupted
+   the SQLite WAL files in the past. The `TIMESHEET_DB` override is kept
+   only for tests and edge cases.
 
 ## Running the App
 
+**Always launch the app via `./run`, never `python app.py` directly.**
+The launcher pulls the latest DB dump from the data repo before the app
+starts and pushes your changes back when it exits. Bypassing it means
+working against a stale DB, or losing work that never makes it to the
+other machine.
+
 ```bash
-source .venv/bin/activate
-python app.py
+./run app    # TUI only
+./run api    # HTTP API only
+./run both   # API in background + TUI in foreground
 ```
 
-To check database location and sync status:
+The launcher activates the venv for you. See
+[Multi-Machine Setup](#multi-machine-setup) for the underlying sync flow
+and recovery if a session crashes before the push.
+
+To check database location without running the app:
 
 ```bash
+source .venv/bin/activate
 python app.py --db-info
 ```
 
@@ -223,16 +232,50 @@ rename/delete - the TUI keeps full control of those.
 
 ## Multi-Machine Setup
 
-The app supports syncing via cloud storage (iCloud, Dropbox, etc.) using the
-`TIMESHEET_DB` environment variable.
+The DB is synced between machines through a private git repo (`sync.sh` +
+the `run` launcher), not iCloud or Dropbox. Cloud-storage sync of live
+SQLite files corrupted the WAL on at least one occasion, so this flow
+treats the local DB as a working copy and the dump in the data repo
+(`timesheet.sql`) as the source of truth.
+
+### One-time setup (per machine)
+
+Clone the data repo to the path `sync.sh` expects:
+
+```bash
+git clone git@github.com:gravitygun/timesheets-data.git ~/.timesheets-data
+```
+
+Then seed the local DB:
+
+```bash
+./sync.sh status   # sanity check
+./sync.sh pull     # writes ~/Library/Application Support/timesheets/timesheet.db
+```
+
+### Daily use
+
+Instead of running `app.py` directly, use the launcher — it pulls before
+launch and pushes on clean exit:
+
+```bash
+./run app    # TUI only
+./run api    # HTTP API only
+./run both   # API in background + TUI in foreground
+```
+
+If the app crashes or is SIGKILL'd, the trap doesn't fire — run
+`./sync.sh push` manually before switching machines.
 
 ### Important
 
-- **Never run the app on both machines simultaneously** - SQLite doesn't
-  handle concurrent access from different machines well
-- Wait for cloud sync to complete before switching machines
-  (use `--db-info` to verify timestamps)
-- The app creates the database automatically if it doesn't exist
+- **Never run the app on both machines simultaneously** — SQLite doesn't
+  handle concurrent access from different machines well, and the dump-based
+  sync flow has no merge story.
+- Always quit the app/API before pulling. `sync.sh pull` refuses to run
+  while it sees them in the process list.
+- `./sync.sh status` shows whether the local DB is dirty and whether the
+  data repo is ahead/behind the remote.
 
 ## Development Setup
 

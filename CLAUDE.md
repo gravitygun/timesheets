@@ -45,8 +45,11 @@ Only `P` type adjustments reduce max hours.
 ## Files
 
 - `app.py` - Main TUI application using Textual framework
-- `storage.py` - SQLite database layer (data in `data/timesheet.db`,
-  WAL mode enabled so the HTTP API can read while the TUI is open)
+- `storage.py` - SQLite database layer. Default DB path is
+  `~/Library/Application Support/timesheets/timesheet.db` (override with
+  `TIMESHEET_DB`). The same path is hard-coded in `sync.sh` — if you
+  change one, change the other. WAL mode is enabled so the HTTP API can
+  read while the TUI is open.
 - `models.py` - TimeEntry and Config dataclasses
 - `api.py` - Thin FastAPI HTTP wrapper around `storage.py`. No business
   logic of its own; new behaviour belongs in `storage.py` and the TUI
