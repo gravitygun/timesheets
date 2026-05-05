@@ -8,8 +8,26 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-PYTHON="${PYTHON:-.venv/bin/python}"
+if [[ ! -f .venv/bin/activate ]]; then
+  printf '\033[31mNo virtualenv found at %s/.venv\033[0m\n' "$(pwd)" >&2
+  cat >&2 <<EOF
+
+Set one up first:
+
+  cd $(pwd)
+  python3.12 -m venv .venv
+  source .venv/bin/activate
+  pip install -r requirements.txt
+
+(See README.md for full setup instructions.)
+EOF
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+source .venv/bin/activate
+
 HOST="${TIMESHEETS_API_HOST:-127.0.0.1}"
 PORT="${TIMESHEETS_API_PORT:-8765}"
 
-exec "${PYTHON}" -m uvicorn api:app --host "${HOST}" --port "${PORT}" "$@"
+exec python -m uvicorn api:app --host "${HOST}" --port "${PORT}" "$@"

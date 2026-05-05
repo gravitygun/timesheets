@@ -20,6 +20,25 @@ red() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 
+if [[ ! -f "${SCRIPT_DIR}/.venv/bin/activate" ]]; then
+  red "No virtualenv found at ${SCRIPT_DIR}/.venv"
+  cat >&2 <<EOF
+
+Set one up first:
+
+  cd ${SCRIPT_DIR}
+  python3.12 -m venv .venv
+  source .venv/bin/activate
+  pip install -r requirements.txt
+
+(See README.md for full setup instructions.)
+EOF
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/.venv/bin/activate"
+
 API_PID=
 PUSHED=0
 
