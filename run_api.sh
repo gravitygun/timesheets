@@ -30,4 +30,7 @@ source .venv/bin/activate
 HOST="${TIMESHEETS_API_HOST:-127.0.0.1}"
 PORT="${TIMESHEETS_API_PORT:-8765}"
 
-exec python -m uvicorn api:app --host "${HOST}" --port "${PORT}" "$@"
+exec python -m uvicorn api:app \
+  --host "${HOST}" --port "${PORT}" \
+  --log-config api_logging.json \
+  "$@"
