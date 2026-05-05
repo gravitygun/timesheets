@@ -77,26 +77,48 @@ cmd_pull() {
   fi
 
   cd "${DATA_REPO}"
+  local before_head after_head
+  before_head=$(git rev-parse HEAD)
   git fetch -q
-  git pull --ff-only
+  git pull --ff-only -q
+  after_head=$(git rev-parse HEAD)
 
   if [[ ! -f "${DUMP_FILE}" ]]; then
     yellow "No dump file in repo yet. Nothing to restore."
     return 0
   fi
 
-  # Backup current DB before overwriting
+  # If the live DB already matches the dump (whether or not the dump
+  # itself changed in this fetch), there is nothing to restore.
+  if [[ -f "${DB_PATH}" ]] && ! local_dirty; then
+    if [[ "${before_head}" == "${after_head}" ]]; then
+      green "Already up to date. Local DB matches the dump — nothing to do."
+    else
+      local n
+      n=$(git rev-list --count "${before_head}..${after_head}")
+      green "Fetched ${n} new commit(s), but timesheet.sql didn't change. Local DB unchanged."
+    fi
+    return 0
+  fi
+
+  # Restore needed: either the dump changed, the live DB diverged, or
+  # there's no live DB yet. Back up first if anything is there.
   if [[ -f "${DB_PATH}" ]]; then
     cp "${DB_PATH}" "${DB_PATH}.pre-pull"
   fi
-
-  # Replace the live DB
   mkdir -p "$(dirname "${DB_PATH}")"
   rm -f "${DB_PATH}" "${DB_PATH}-wal" "${DB_PATH}-shm"
   sqlite3 "${DB_PATH}" <"${DUMP_FILE}"
 
-  green "Pulled. Local DB restored from dump."
-  if [[ -f "${DB_PATH}.pre-pull" ]]; then
+  if [[ ! -f "${DB_PATH}.pre-pull" ]]; then
+    green "Local DB created from dump (no previous DB found)."
+  elif [[ "${before_head}" == "${after_head}" ]]; then
+    green "Local DB restored from dump (--force: discarded local changes)."
+    yellow "Previous DB backed up to ${DB_PATH}.pre-pull"
+  else
+    local n
+    n=$(git rev-list --count "${before_head}..${after_head}")
+    green "Pulled ${n} new commit(s). Local DB restored from updated dump."
     yellow "Previous DB backed up to ${DB_PATH}.pre-pull"
   fi
 }
