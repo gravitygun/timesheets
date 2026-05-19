@@ -3219,12 +3219,12 @@ class TimesheetApp(App):
             nav_bits: list[str] = []
             if period is None:
                 if finalised:
-                    nav_bits.append("[bold][[/bold] previous bills")
+                    nav_bits.append(r"[bold]\[[/bold] previous bills")
             else:
                 sequence: list[tuple[int, int] | None] = [*finalised, None]
                 idx = sequence.index(period)
                 if idx > 0:
-                    nav_bits.append("[bold][[/bold] older")
+                    nav_bits.append(r"[bold]\[[/bold] older")
                 if idx < len(sequence) - 1:
                     nav_bits.append("[bold]][/bold] newer")
             if nav_bits:
