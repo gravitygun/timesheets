@@ -1423,14 +1423,20 @@ class TimesheetApp(App):
             if t.id in set(ticket_ids)
         }
 
-        # Points setup
+        # Points setup. Lifetime hours are scoped to contract_start (not
+        # points_start_date) so pre-contract work, which is billed under
+        # the previous arrangement, doesn't inflate this contract's
+        # per-ticket points - matching the billing view and the carryover
+        # row in this same screen.
         config = storage.get_config()
         show_points = config.points_start_date is not None
         lifetime_hours: dict[str, Decimal] = {}
-        if show_points and config.points_start_date:
-            lifetime_hours = storage.get_ticket_lifetime_hours(
-                config.points_start_date, ticket_ids=ticket_ids,
-            )
+        if show_points:
+            scope_start = config.contract_start or config.points_start_date
+            if scope_start:
+                lifetime_hours = storage.get_ticket_lifetime_hours(
+                    scope_start, ticket_ids=ticket_ids,
+                )
 
         # Calculate optimal ticket column width (min 6, max 10).
         # +2 for the closed-marker prefix ("✓ " or "  ").
@@ -1686,18 +1692,19 @@ class TimesheetApp(App):
         entered_cell.append(f"{float(month_entered):>6g}", style=entered_style)
         week_total_row.append(entered_cell)
 
-        # Points totals for summary rows
+        # Points totals for summary rows — scoped to the month being viewed
+        # so the green total reflects the bill for this month, not the
+        # whole contract.
         billed_pts = 0
         billable_pts = 0
         speculative_pts = 0
         if show_points:
-            # Per-deliverable rounding (matches billing view) so totals reconcile.
-            # This is global (across all tickets), not just this month - the
-            # bottom-line summary reports the actual current bill, not a
-            # month-scoped figure.
-            billed_pts, billable_pts, speculative_pts = storage.get_points_by_status(
-                config.hours_per_point,
-                contract_start=config.contract_start,
+            billed_pts, billable_pts, speculative_pts = (
+                storage.get_monthly_points_breakdown(
+                    self.current_year,
+                    self.current_month,
+                    config.hours_per_point,
+                )
             )
 
             worked_row.append(Text(""))
@@ -1846,7 +1853,7 @@ class TimesheetApp(App):
         elif action == "year_view":
             return mode not in ("year", "day")
         elif action == "allocations_view":
-            return mode not in ("allocations", "billing")
+            return mode != "allocations"
         elif action == "billing_view":
             return mode != "billing"
 
