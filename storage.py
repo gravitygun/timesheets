@@ -1331,6 +1331,13 @@ def get_monthly_points_breakdown(
     - billed: closed and already billed
     - billable: closed but not yet billed
     - speculative: still open
+
+    Hours are bucketed by (deliverable, status) and ceiling-rounded per
+    bucket - matching the per-deliverable rounding used by the billing
+    view. Per-ticket rounding here would over-count whenever several
+    tickets share a deliverable (each <hours_per_point remainder rounds
+    up independently) and the bottom-line would not reconcile with the
+    actual bill.
     """
     from calendar import monthrange
 
@@ -1339,12 +1346,12 @@ def get_monthly_points_breakdown(
     conn = get_connection()
     rows = conn.execute(
         """
-        SELECT t.archived, t.billed, ta.ticket_id,
+        SELECT t.archived, t.billed, t.deliverable_id,
                SUM(CAST(ta.hours AS REAL)) as total
         FROM ticket_allocations ta
         JOIN tickets t ON ta.ticket_id = t.id
         WHERE ta.date >= ? AND ta.date <= ?
-        GROUP BY ta.ticket_id, t.archived, t.billed
+        GROUP BY t.deliverable_id, t.archived, t.billed
         """,
         (start.isoformat(), end.isoformat()),
     ).fetchall()
