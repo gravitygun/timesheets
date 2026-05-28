@@ -21,6 +21,7 @@ from screens import (
     DeliverableManagementScreen,
     EditAllocationScreen,
     EditDayScreen,
+    EditTicketScreen,
     ExportAllocationsScreen,
     FinaliseBillScreen,
     MoveAllocationScreen,
@@ -82,6 +83,11 @@ class TimesheetDataTable(DataTable):
         elif event.key == "v" and view_mode == "allocations":
             if hasattr(self.app, '_alloc_move_allocation'):
                 self.app._alloc_move_allocation()  # type: ignore[attr-defined]
+            event.prevent_default()
+            event.stop()
+        elif event.key == "t" and view_mode == "allocations":
+            if hasattr(self.app, '_alloc_edit_ticket'):
+                self.app._alloc_edit_ticket()  # type: ignore[attr-defined]
             event.prevent_default()
             event.stop()
         # For other keys/views, don't intercept - let DataTable handle normally
@@ -258,6 +264,7 @@ class TimesheetApp(App):
         Binding("m", "month_view", "Month"),
         Binding("y", "year_view", "Year"),
         Binding("t", "goto_today", "Today"),
+        Binding("t", "edit_ticket_on_alloc_row", "Ticket"),
         Binding("$", "toggle_money", "£"),
         Binding("e", "edit_day", "Edit"),
         Binding("h", "populate_holidays", "Holidays"),
@@ -1860,6 +1867,8 @@ class TimesheetApp(App):
         # Navigation
         elif action == "goto_today":
             return mode in ("week", "month") or False
+        elif action == "edit_ticket_on_alloc_row":
+            return mode == "allocations" or False
         elif action in ("alloc_prev_month", "alloc_next_month"):
             return mode in ("allocations", "billing") or False
 
@@ -2817,6 +2826,54 @@ class TimesheetApp(App):
             ),
             self._on_alloc_view_edit_complete,
         )
+
+    def action_edit_ticket_on_alloc_row(self) -> None:
+        """Edit the ticket on the selected allocations row (binding action)."""
+        if self.view_mode != "allocations":
+            return
+        self._alloc_edit_ticket()
+
+    def _alloc_edit_ticket(self) -> None:
+        """Open the ticket on the cursor row for editing.
+
+        Works for regular ticket rows and for carryover rows
+        (key '__co_<id>'); skips the summary rows (Worked, Status,
+        Wk Tot, carryover divider).
+        """
+        if self.view_mode != "allocations":
+            return
+        table = self.query_one("#allocations-table", DataTable)
+        if table.cursor_row >= len(table.rows):
+            return
+        row_key = list(table.rows.keys())[table.cursor_row]
+        key_str = str(row_key.value)
+        if key_str.startswith("__co_"):
+            ticket_id = key_str[len("__co_"):]
+        elif key_str.startswith("__"):
+            self.notify("No ticket on this row", severity="warning")
+            return
+        else:
+            ticket_id = key_str
+
+        ticket = storage.get_ticket(ticket_id)
+        if not ticket:
+            self.notify(f"Ticket {ticket_id} not found", severity="error")
+            return
+
+        # Save cursor context so we can restore it after the modal closes
+        self._alloc_cursor_ctx = (ticket_id, table.cursor_column)
+        self.push_screen(EditTicketScreen(ticket), self._on_alloc_ticket_edited)
+
+    def _on_alloc_ticket_edited(self, result: Ticket | None) -> None:
+        """Persist a ticket edit made from the allocations view."""
+        new_ticket_id: str | None = None
+        if result:
+            storage.save_ticket(result)
+            self.notify(f"Ticket {result.id} saved")
+            new_ticket_id = result.id
+            self._refresh_display()
+        # If the ticket was renamed, restore the cursor to the new ID
+        self._restore_alloc_cursor(new_ticket_id)
 
     def _restore_alloc_cursor(self, ticket_id: str | None = None) -> None:
         """Restore cursor to the saved ticket and column after a table refresh."""
