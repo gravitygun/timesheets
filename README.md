@@ -82,14 +82,15 @@ python app.py --db-info
 
 ### Views
 
-The app has four top-level views, accessible via keyboard shortcuts:
+The app has five top-level views, accessible via keyboard shortcuts:
 
-| Key | View        | Description                           |
-| --- | ----------- | ------------------------------------- |
-| `w` | Week        | Daily time entries for one week       |
-| `m` | Month       | Weekly summaries for one month        |
-| `y` | Year        | Monthly summaries for fiscal year     |
-| `M` | Allocations | Ticket allocations matrix for a month |
+| Key | View        | Description                                |
+| --- | ----------- | ------------------------------------------ |
+| `w` | Week        | Daily time entries for one week            |
+| `m` | Month       | Weekly summaries for one month             |
+| `y` | Year        | Monthly summaries for fiscal year          |
+| `M` | Allocations | Ticket allocations matrix for a month      |
+| `B` | Billing     | Current bill, broken down by deliverable   |
 
 Pressing `Enter` on a day in week view opens **Day view**, showing ticket
 allocations and work descriptions for that day.
@@ -104,7 +105,7 @@ allocations and work descriptions for that day.
 | `Up/Down` | Navigate rows                                               |
 | `Enter`   | Drill down (year → month → week → day)                      |
 | `Esc`     | Return to week view (from day view)                         |
-| `t`       | Jump to today                                               |
+| `t`       | Jump to today (week/month view)                             |
 
 ### Editing
 
@@ -129,6 +130,7 @@ Worked hours can be allocated to tickets (e.g., JIRA IDs) for billing reports.
 | Key | Action                                                     |
 | --- | ---------------------------------------------------------- |
 | `K` | Open ticket management screen                              |
+| `D` | Open deliverable management screen                         |
 | `M` | Open allocations report (tickets × days)                   |
 | `a` | Add allocation (day view and allocations view)             |
 | `e` | Edit allocation (day view and allocations view)            |
@@ -136,6 +138,8 @@ Worked hours can be allocated to tickets (e.g., JIRA IDs) for billing reports.
 | `v` | Move allocation to a different day (day/allocations view)  |
 | `c` | Toggle "entered on client" flag (day view)                 |
 | `p` | Toggle "points entered" flag (allocations view)            |
+| `t` | Open ticket on selected row for editing (allocations view) |
+| `R` | Export allocations report (allocations view)               |
 
 **Week view indicators** (Alloc column):
 
@@ -153,6 +157,19 @@ Worked hours can be allocated to tickets (e.g., JIRA IDs) for billing reports.
 - Archive/unarchive tickets
 - Delete tickets (only if no allocations exist)
 - Search/filter tickets
+
+### Billing
+
+| Key | Action                                                  |
+| --- | ------------------------------------------------------- |
+| `B` | Open billing view (current bill by deliverable)         |
+| `f` | Finalise the current bill (billing view)                |
+
+The billing view groups archived-and-unbilled tickets by deliverable
+and ceiling-rounds hours per deliverable bucket to give the truthful
+point total. Finalising marks those tickets as billed for a chosen
+month and snapshots the bill lines so historical views stay accurate
+even if allocations drift later.
 
 ### Other
 
