@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import date, time, timedelta
 
 from textual.app import ComposeResult
@@ -13,6 +14,18 @@ from textual.screen import ModalScreen
 
 from models import Ticket, TicketAllocation, TimeEntry
 import storage
+
+
+def _emit_terminal_title(title: str) -> None:
+    """Send OSC 0 so the terminal updates its window/tab title.
+
+    Mirrors the helper in app.py - kept here to avoid a circular
+    import. Textual's App.title doesn't emit OSC on its own.
+    """
+    try:
+        os.write(1, f"\x1b]0;{title}\x07".encode("utf-8"))
+    except (OSError, UnicodeEncodeError):
+        pass
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -689,6 +702,9 @@ class TicketManagementScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         """Set up the table and load data."""
+        title = "timesheets: Tickets Management"
+        self.app.title = title
+        _emit_terminal_title(title)
         table = self.query_one("#tickets-table", DataTable)
         table.cursor_type = "row"
         table.add_column("ID", width=10)
@@ -935,6 +951,9 @@ class DeliverableManagementScreen(ModalScreen[None]):
                 yield Button("Dismiss [Esc]", id="btn-close")
 
     def on_mount(self) -> None:
+        title = "timesheets: Deliverables Management"
+        self.app.title = title
+        _emit_terminal_title(title)
         table = self.query_one("#del-mgmt-table", DataTable)
         table.cursor_type = "row"
         table.add_column("Type", width=5)

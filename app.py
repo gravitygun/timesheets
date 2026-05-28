@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 from datetime import date, timedelta
@@ -34,6 +35,21 @@ from screens import (
     UpdateAvailableScreen,
 )
 from widgets import CombinedHeader, DayDescription, DayHeader, DaySummary, DayTimeEntry, WeeklySummary
+
+
+def _emit_terminal_title(title: str) -> None:
+    """Send OSC 0 so the terminal updates its window/tab title.
+
+    Textual 7.x's `App.title` is purely an in-app reactive for the
+    optional Header widget - it does not emit the escape sequence
+    that terminals like iTerm2 or VS Code's integrated terminal use.
+    OSC is out-of-band, so writing it straight to fd 1 doesn't
+    disturb Textual's rendered buffer.
+    """
+    try:
+        os.write(1, f"\x1b]0;{title}\x07".encode("utf-8"))
+    except (OSError, UnicodeEncodeError):
+        pass
 
 
 class GitStatus(NamedTuple):
@@ -733,6 +749,51 @@ class TimesheetApp(App):
             self._refresh_allocations_display()
         elif self.view_mode == "billing":
             self._refresh_billing_display()
+        self._update_window_title()
+
+    def _update_window_title(self) -> None:
+        """Set the terminal title to mirror the current view's header."""
+        suffix = self._compute_window_subtitle()
+        full = f"timesheets: {suffix}" if suffix else "timesheets"
+        self.title = full
+        _emit_terminal_title(full)
+
+    def _compute_window_subtitle(self) -> str:
+        """Build the per-view title suffix; mirrors the on-screen header."""
+        mode = self.view_mode
+        if mode == "week":
+            if self.weeks and 0 <= self.current_week_idx < len(self.weeks):
+                month_name = date(
+                    self.current_year, self.current_month, 1,
+                ).strftime("%B %Y")
+                return f"TIMESHEET: WEEK {self.current_week_idx + 1} {month_name}"
+        elif mode == "month":
+            month_name = date(
+                self.current_year, self.current_month, 1,
+            ).strftime("%B %Y")
+            return f"TIMESHEET: {month_name}"
+        elif mode == "year":
+            return (
+                f"TIMESHEET: {self.company_year_start}"
+                f"-{self.company_year_start + 1}"
+            )
+        elif mode == "day" and self.day_view_date:
+            return f"ALLOCATIONS: {self.day_view_date.strftime('%a %b %d, %Y')}"
+        elif mode == "allocations":
+            month_name = date(
+                self.current_year, self.current_month, 1,
+            ).strftime("%B %Y")
+            return f"ALLOCATIONS: {month_name}"
+        elif mode == "billing":
+            if self.billing_view_period is None:
+                return "CURRENT BILL"
+            y, m = self.billing_view_period
+            return f"BILL {date(y, m, 1).strftime('%b %Y').upper()}"
+        return ""
+
+    def on_screen_resume(self) -> None:
+        """Restore the terminal title after a modal screen closes."""
+        self._update_window_title()
 
     def _refresh_week_display(self):
         # Update combined header
