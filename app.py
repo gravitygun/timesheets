@@ -549,13 +549,28 @@ class TimesheetApp(App):
         status = _check_git_status()
         if status.state == "out_of_sync":
             assert status.branch is not None
-            self.call_from_thread(
-                self.push_screen,
-                UpdateAvailableScreen(
-                    status.branch, status.ahead, status.behind,
-                ),
-                self._on_update_dialog_dismissed,
-            )
+            # Ahead-only means there's nothing to pull, just commits we
+            # haven't pushed yet - that's a soft warning, not a "stop"
+            # modal. The modal stays for behind/diverged because those
+            # really do have upstream changes the user should see first.
+            if status.behind == 0 and status.ahead > 0:
+                plural = "s" if status.ahead != 1 else ""
+                self.call_from_thread(
+                    self.notify,
+                    (
+                        f"Local commits not pushed: {status.ahead} "
+                        f"commit{plural} ahead of remote {status.branch}"
+                    ),
+                    severity="warning",
+                )
+            else:
+                self.call_from_thread(
+                    self.push_screen,
+                    UpdateAvailableScreen(
+                        status.branch, status.ahead, status.behind,
+                    ),
+                    self._on_update_dialog_dismissed,
+                )
         elif status.state == "in_sync":
             self.call_from_thread(
                 self.notify,
