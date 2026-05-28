@@ -2005,3 +2005,95 @@ class FinaliseBillScreen(ModalScreen[tuple[int, int] | None]):
             self.app.notify("Invalid month format (use YYYY-MM)", severity="error")
             return
         self.dismiss((year, month))
+
+
+class UpdateAvailableScreen(ModalScreen[bool]):
+    """Startup warning: the local branch is out of sync with the remote.
+
+    Returns True for 'Continue anyway', False for 'Quit' (the default).
+    """
+
+    CSS = """
+    UpdateAvailableScreen {
+        align: center middle;
+    }
+
+    #update-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: thick $warning;
+    }
+
+    #update-title {
+        width: 100%;
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #update-message {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    #update-buttons {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        align: center middle;
+    }
+
+    #update-buttons Button {
+        width: auto;
+        min-width: 14;
+        margin: 0 2;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "quit_app", "Quit"),
+        Binding("q", "quit_app", "Quit"),
+        Binding("c", "continue_anyway", "Continue"),
+    ]
+
+    def __init__(self, branch: str, ahead: int, behind: int):
+        super().__init__()
+        self.branch = branch
+        self.ahead = ahead
+        self.behind = behind
+
+    def compose(self) -> ComposeResult:
+        parts = []
+        if self.ahead:
+            parts.append(
+                f"{self.ahead} commit{'s' if self.ahead != 1 else ''} ahead"
+            )
+        if self.behind:
+            parts.append(
+                f"{self.behind} commit{'s' if self.behind != 1 else ''} behind"
+            )
+        delta = ", ".join(parts) if parts else "out of sync"
+        message = (
+            f"Current branch {self.branch} is not up to date with the "
+            f"remote ({delta})."
+        )
+        with Vertical(id="update-dialog"):
+            yield Label("Updates available", id="update-title")
+            yield Label(message, id="update-message")
+            with Horizontal(id="update-buttons"):
+                yield Button("Quit (Q)", variant="primary", id="quit")
+                yield Button("Continue (C)", variant="default", id="continue")
+
+    def on_mount(self) -> None:
+        self.query_one("#quit", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "continue")
+
+    def action_quit_app(self) -> None:
+        self.dismiss(False)
+
+    def action_continue_anyway(self) -> None:
+        self.dismiss(True)

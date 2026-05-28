@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import subprocess
+import threading
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
+from typing import NamedTuple
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -27,8 +31,110 @@ from screens import (
     MoveAllocationScreen,
     TicketManagementScreen,
     TicketSelectScreen,
+    UpdateAvailableScreen,
 )
 from widgets import CombinedHeader, DayDescription, DayHeader, DaySummary, DayTimeEntry, WeeklySummary
+
+
+class GitStatus(NamedTuple):
+    """Result of the upstream-update probe.
+
+    state is one of:
+    - "in_sync": branch tracks upstream and is up to date (branch set).
+    - "out_of_sync": branch is ahead and/or behind upstream
+      (branch, ahead, behind set).
+    - "unavailable": the probe couldn't determine sync state; reason is
+      a short human-readable explanation for the toast.
+    """
+    state: str
+    branch: str | None = None
+    ahead: int = 0
+    behind: int = 0
+    reason: str | None = None
+
+
+def _check_git_status() -> GitStatus:
+    """Probe git for this app's branch vs its upstream.
+
+    Each failure stage maps to a specific human-readable reason
+    rather than a silent None, so the UI can show a toast explaining
+    why the check couldn't run (offline, detached HEAD, etc.).
+    """
+    repo_root = Path(__file__).resolve().parent
+
+    def git(*args: str, timeout: float = 3.0) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    # First check: is git even available on PATH?
+    try:
+        subprocess.run(
+            ["git", "--version"],
+            cwd=repo_root, capture_output=True, timeout=2.0,
+        )
+    except FileNotFoundError:
+        return GitStatus("unavailable", reason="git is not installed")
+    except (subprocess.TimeoutExpired, OSError):
+        # Weird, but treat as missing so we don't hang the UI later.
+        return GitStatus("unavailable", reason="git is not responding")
+
+    if git("rev-parse", "--is-inside-work-tree") != "true":
+        return GitStatus("unavailable", reason="not running from a git repo")
+
+    branch = git("symbolic-ref", "--short", "HEAD")
+    if not branch:
+        return GitStatus("unavailable", reason="detached HEAD")
+
+    upstream = git("rev-parse", "--abbrev-ref", "@{u}")
+    if not upstream:
+        return GitStatus(
+            "unavailable", branch=branch, reason="no upstream set",
+        )
+
+    # Refresh remote refs. Longer timeout because fetch can be slow on
+    # a large repo, but still bounded so a hung network doesn't keep
+    # the status toast from appearing.
+    if git("fetch", "--quiet", timeout=5.0) is None:
+        return GitStatus(
+            "unavailable", branch=branch, reason="offline (fetch failed)",
+        )
+
+    counts = git("rev-list", "--left-right", "--count", "HEAD...@{u}")
+    if not counts:
+        return GitStatus(
+            "unavailable", branch=branch,
+            reason="couldn't compare to upstream",
+        )
+    parts = counts.split()
+    if len(parts) != 2:
+        return GitStatus(
+            "unavailable", branch=branch,
+            reason="unexpected rev-list output",
+        )
+    try:
+        ahead, behind = int(parts[0]), int(parts[1])
+    except ValueError:
+        return GitStatus(
+            "unavailable", branch=branch,
+            reason="unexpected rev-list output",
+        )
+
+    if ahead == 0 and behind == 0:
+        return GitStatus("in_sync", branch=branch)
+    return GitStatus(
+        "out_of_sync", branch=branch, ahead=ahead, behind=behind,
+    )
 
 
 class TimesheetDataTable(DataTable):
@@ -431,6 +537,41 @@ class TimesheetApp(App):
         self._select_date(date.today())
         # Focus the week table
         self.query_one("#week-table", DataTable).focus()
+        # Probe git for upstream updates in the background so the UI is
+        # interactive immediately; the worker fails safe (no dialog) when
+        # not in a git repo, offline, or already in sync.
+        threading.Thread(
+            target=self._check_for_updates_bg, daemon=True,
+        ).start()
+
+    def _check_for_updates_bg(self) -> None:
+        """Run the git probe off the UI thread; schedule UI updates by state."""
+        status = _check_git_status()
+        if status.state == "out_of_sync":
+            assert status.branch is not None
+            self.call_from_thread(
+                self.push_screen,
+                UpdateAvailableScreen(
+                    status.branch, status.ahead, status.behind,
+                ),
+                self._on_update_dialog_dismissed,
+            )
+        elif status.state == "in_sync":
+            self.call_from_thread(
+                self.notify,
+                f"App is up to date with remote branch {status.branch}",
+            )
+        else:  # "unavailable"
+            self.call_from_thread(
+                self.notify,
+                f"Can't check if updates are available: {status.reason}",
+                severity="warning",
+            )
+
+    def _on_update_dialog_dismissed(self, continue_anyway: bool | None) -> None:
+        """Quit unless the user explicitly picked Continue."""
+        if not continue_anyway:
+            self.exit()
 
     def _setup_week_table(self):
         table = self.query_one("#week-table", DataTable)
