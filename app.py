@@ -3470,9 +3470,18 @@ class TimesheetApp(App):
             ]
         else:
             label = "Snapshot" if is_snapshot else "Reconstructed"
+            # YTD up to and including the period being viewed: how many
+            # points had been billed by the end of this month.
+            ytd_through_period = storage.get_billed_points_total(
+                config.hours_per_point,
+                up_to_year=period[0], up_to_month=period[1],
+                contract_start=config.contract_start,
+            )
             summary_parts = [
                 f"{label}: {int(total_points)} pts across "
-                f"{ticket_count} ticket(s)",
+                f"{ticket_count} ticket(s)  |  "
+                f"YTD through {date(period[0], period[1], 1).strftime('%b %Y')}: "
+                f"{int(ytd_through_period)} pts",
             ]
             if not is_snapshot:
                 summary_parts.append(

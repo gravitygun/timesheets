@@ -1289,35 +1289,43 @@ def get_billed_points_total(
     up_to_month: int | None = None,
     contract_start: date | None = None,
 ) -> Decimal:
-    """Get total points already billed (closed + billed tickets).
+    """Total points already billed, summed from the bill_lines snapshots.
 
-    Optionally filter to bills marked with billed_year/billed_month
-    on or before the given year/month. If contract_start is given,
-    only counts allocations on or after that date - so any hours that
-    pre-date the points contract (billed under the prior hourly scheme)
-    don't pollute the points-system YTD totals.
+    The truthful YTD figure is the sum of the per-month, per-deliverable
+    points that were locked in at finalisation time and stored in
+    bill_lines - NOT the raw billed hours summed and rounded once across
+    the whole contract. Summing raw hours and rounding at the very end
+    discards every per-deliverable, per-month ceiling round that the
+    individual bills already paid for, and the YTD comes out lower than
+    sum(monthly bills).
+
+    hours_per_point is retained in the signature for callers that still
+    pass it, but no longer used: bill_lines.points is the integer that
+    was actually invoiced, computed by _compute_current_bill_lines at
+    finalisation time.
+
+    Filters:
+    - up_to_year/up_to_month: include bills whose (year, month) is on
+      or before the given date.
+    - contract_start: include bills whose (year, month) is on or after
+      contract_start's (year, month). Bills pre-dating the points
+      contract (billed under the prior hourly scheme) are excluded.
     """
+    del hours_per_point  # see docstring
     conn = get_connection()
-    sql = """
-        SELECT COALESCE(SUM(CAST(ta.hours AS REAL)), 0) as total
-        FROM ticket_allocations ta
-        JOIN tickets t ON ta.ticket_id = t.id
-        WHERE t.billed = 1
-    """
+    sql = "SELECT COALESCE(SUM(points), 0) AS total FROM bill_lines WHERE 1=1"
     params: list[object] = []
-    if contract_start is not None:
-        sql += " AND ta.date >= ?"
-        params.append(contract_start.isoformat())
     if up_to_year is not None and up_to_month is not None:
-        sql += (
-            " AND (t.billed_year < ? OR "
-            "(t.billed_year = ? AND t.billed_month <= ?))"
-        )
+        sql += " AND (year < ? OR (year = ? AND month <= ?))"
         params.extend([up_to_year, up_to_year, up_to_month])
+    if contract_start is not None:
+        sql += " AND (year > ? OR (year = ? AND month >= ?))"
+        params.extend([
+            contract_start.year, contract_start.year, contract_start.month,
+        ])
     row = conn.execute(sql, params).fetchone()
     conn.close()
-    total_hours = Decimal(str(row["total"])).quantize(Decimal("0.01"))
-    return (total_hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING)
+    return Decimal(row["total"])
 
 
 def get_monthly_points_breakdown(

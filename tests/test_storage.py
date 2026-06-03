@@ -1113,73 +1113,124 @@ class TestUnarchiveClearsBilled:
         assert a.billed_month is None
 
 
+def _insert_bill_line(
+    storage, year: int, month: int, deliverable_id: str,
+    hours: str, points: int, line_no: int = 0,
+):
+    """Helper - drop a row straight into the bill_lines snapshot table.
+
+    Avoids having to spin up tickets, allocations and run finalise_bill
+    for tests that only care about how get_billed_points_total reads
+    its inputs. Mirrors the columns _compute_current_bill_lines /
+    finalise_bill would write at finalisation time.
+    """
+    conn = storage.get_connection()
+    conn.execute(
+        """
+        INSERT INTO bill_lines
+            (year, month, line_no, deliverable_id, deliverable_title,
+             work_package_id, work_package_title, hours, points,
+             amount_ex_vat, amount_inc_vat)
+        VALUES (?, ?, ?, ?, '', '', '', ?, ?, '0.00', '0.00')
+        """,
+        (year, month, line_no, deliverable_id, hours, points),
+    )
+    conn.commit()
+    conn.close()
+
+
 class TestBilledPointsTotal:
-    def test_counts_only_billed_tickets(self, temp_database):
+    def test_sums_points_from_bill_lines(self, temp_database):
+        """The YTD is the sum of points across finalised bill_lines."""
         storage = temp_database
-        # Closed and billed
+        # April: 75 pts across two deliverables
+        _insert_bill_line(storage, 2026, 4, "WP1-D1", "70.00", 35, line_no=0)
+        _insert_bill_line(storage, 2026, 4, "WP1-D2", "80.00", 40, line_no=1)
+        # May: 59 pts across one deliverable
+        _insert_bill_line(storage, 2026, 5, "WP1-D1", "118.00", 59, line_no=0)
+
+        assert storage.get_billed_points_total(Decimal("2")) == Decimal("134")
+
+    def test_empty_when_no_bill_lines(self, temp_database):
+        """Tickets flagged billed=true don't contribute on their own.
+
+        Only finalised bill snapshots count. This guards against legacy
+        code paths that flip ticket.billed without writing bill_lines.
+        """
+        storage = temp_database
         storage.save_ticket(Ticket(
             id="DONE", description="d", archived=True,
             billed=True, billed_year=2026, billed_month=4,
         ))
-        # Closed but not billed
-        storage.save_ticket(Ticket(id="OWED", description="o", archived=True))
-        # Open
-        storage.save_ticket(Ticket(id="WIP", description="w"))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="DONE", date=date(2026, 4, 1), hours=Decimal("4"),
+        ))
 
-        for tid in ("DONE", "OWED", "WIP"):
-            storage.save_allocation(TicketAllocation(
-                ticket_id=tid, date=date(2026, 4, 1), hours=Decimal("4"),
-            ))
-
-        # Only DONE counts: 4h / 2h per pt = 2 pts
-        assert storage.get_billed_points_total(Decimal("2")) == Decimal("2")
+        assert storage.get_billed_points_total(Decimal("2")) == Decimal("0")
 
     def test_filtered_up_to_month(self, temp_database):
         storage = temp_database
-        storage.save_ticket(Ticket(
-            id="MAR", description="m", archived=True,
-            billed=True, billed_year=2026, billed_month=3,
-        ))
-        storage.save_ticket(Ticket(
-            id="MAY", description="m", archived=True,
-            billed=True, billed_year=2026, billed_month=5,
-        ))
-        storage.save_allocation(TicketAllocation(
-            ticket_id="MAR", date=date(2026, 3, 1), hours=Decimal("4"),
-        ))
-        storage.save_allocation(TicketAllocation(
-            ticket_id="MAY", date=date(2026, 5, 1), hours=Decimal("4"),
-        ))
+        _insert_bill_line(storage, 2026, 3, "WP1-D1", "4.00", 2)
+        _insert_bill_line(storage, 2026, 5, "WP1-D1", "4.00", 2)
 
-        # Up to April: only MAR (billed_month=3)
+        # Up to April: only March's bill counts.
         total = storage.get_billed_points_total(
             Decimal("2"), up_to_year=2026, up_to_month=4,
         )
         assert total == Decimal("2")
 
-    def test_contract_start_excludes_pre_contract_hours(self, temp_database):
-        """Even on a billed ticket, pre-contract hours don't count."""
+    def test_contract_start_excludes_pre_contract_bills(self, temp_database):
+        """Bills predating the contract start (e.g. legacy hourly) are
+        excluded so the points-YTD reflects only the points contract."""
         storage = temp_database
-        storage.save_ticket(Ticket(
-            id="SPAN", description="s", archived=True,
-            billed=True, billed_year=2026, billed_month=4,
-        ))
-        # Pre-contract hours
-        storage.save_allocation(TicketAllocation(
-            ticket_id="SPAN", date=date(2026, 3, 28), hours=Decimal("8"),
-        ))
-        # In-contract hours
-        storage.save_allocation(TicketAllocation(
-            ticket_id="SPAN", date=date(2026, 4, 5), hours=Decimal("4"),
-        ))
+        # Hypothetical hourly-era bill that was migrated/imported.
+        _insert_bill_line(storage, 2026, 3, "WP1-D1", "16.00", 8)
+        # First points-contract bill.
+        _insert_bill_line(storage, 2026, 4, "WP1-D1", "8.00", 4)
 
-        # Without contract_start: counts both = 12h / 2 = 6 pts
-        assert storage.get_billed_points_total(Decimal("2")) == Decimal("6")
-        # With contract_start: only 4h counts = 2 pts
+        # Without contract_start: counts both.
+        assert storage.get_billed_points_total(Decimal("2")) == Decimal("12")
+        # With contract_start = 2026-04-01: only April.
         total = storage.get_billed_points_total(
             Decimal("2"), contract_start=date(2026, 4, 1),
         )
-        assert total == Decimal("2")
+        assert total == Decimal("4")
+
+    def test_reconciles_with_sum_of_monthly_bills(self, temp_database):
+        """Global invariant: get_billed_points_total(up_to=(Y,M)) ==
+        sum of bill_lines.points for every finalised bill on or before
+        (Y, M). This is the property whose breach caused the
+        131-vs-134 discrepancy on the May 2026 monthly view."""
+        storage = temp_database
+        # Multi-month, multi-deliverable: each bucket independently
+        # ceiling-rounded so per-ticket summing would be wrong.
+        bills_by_month = {
+            (2026, 4): [("WP1-D1", "70.00", 35), ("WP1-D2", "80.00", 40)],
+            (2026, 5): [
+                ("WP1-D1", "14.25", 8),
+                ("WP1-D2", "79.00", 40),
+                ("WP1-D3", "8.00", 4),
+                ("WP2-D1", "6.75", 4),
+                ("WP3-D1", "5.50", 3),
+            ],
+            (2026, 6): [("WP1-D1", "3.50", 2)],
+        }
+        for (y, m), lines in bills_by_month.items():
+            for line_no, (did, hours, pts) in enumerate(lines):
+                _insert_bill_line(storage, y, m, did, hours, pts, line_no)
+
+        def expected_up_to(year: int, month: int) -> int:
+            return sum(
+                pts
+                for (y, m), lines in bills_by_month.items()
+                if (y, m) <= (year, month)
+                for _, _, pts in lines
+            )
+
+        for (y, m) in bills_by_month:
+            assert storage.get_billed_points_total(
+                Decimal("2"), up_to_year=y, up_to_month=m,
+            ) == Decimal(expected_up_to(y, m))
 
 
 class TestFinalisedBillsHistory:
