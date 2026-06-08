@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from datetime import date, time, timedelta
+from decimal import Decimal
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -1848,8 +1849,6 @@ class ExportAllocationsScreen(ModalScreen[str | None]):
         from calendar import monthrange
         from itertools import groupby
 
-        from decimal import Decimal
-
         adjust_type_labels = {
             "L": "Leave", "S": "Sick", "T": "Training", "P": "Public Holiday",
         }
@@ -2116,3 +2115,110 @@ class UpdateAvailableScreen(ModalScreen[bool]):
 
     def action_continue_anyway(self) -> None:
         self.dismiss(True)
+
+
+class DeliverableBillTicketsScreen(ModalScreen[None]):
+    """Modal showing the tickets that make up a deliverable's bill line."""
+
+    CSS = """
+    DeliverableBillTicketsScreen {
+        align: center middle;
+    }
+
+    #del-bill-dialog {
+        width: 90;
+        height: 80%;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    #del-bill-title {
+        width: 100%;
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #del-bill-subtitle {
+        width: 100%;
+        text-align: center;
+        margin-bottom: 1;
+    }
+
+    #del-bill-table {
+        height: 1fr;
+    }
+
+    #del-bill-buttons {
+        height: 3;
+        margin-top: 1;
+        align: center middle;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Close", show=False),
+    ]
+
+    def __init__(
+        self,
+        deliverable_id: str | None,
+        deliverable_title: str,
+        period: tuple[int, int] | None,
+        contract_start: date | None,
+    ) -> None:
+        super().__init__()
+        self.deliverable_id = deliverable_id
+        self.deliverable_title = deliverable_title
+        self.period = period
+        self.contract_start = contract_start
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="del-bill-dialog"):
+            del_label = self.deliverable_id or "UNLINKED"
+            yield Label(
+                f"{del_label} — {self.deliverable_title}",
+                id="del-bill-title",
+            )
+            if self.period is None:
+                period_label = "Current bill (unbilled closed tickets)"
+            else:
+                period_label = (
+                    f"Bill {date(self.period[0], self.period[1], 1).strftime('%b %Y')}"
+                )
+            yield Label(period_label, id="del-bill-subtitle")
+            yield DataTable(id="del-bill-table")
+            with Horizontal(id="del-bill-buttons"):
+                yield Button("Close (Esc)", id="close-btn")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#del-bill-table", DataTable)
+        table.cursor_type = "row"
+        table.add_column("Ticket", width=10, key="ticket")
+        table.add_column("Description", width=55, key="desc")
+        table.add_column("Hours", width=8, key="hours")
+        lines = storage.get_tickets_for_deliverable_in_bill(
+            self.deliverable_id, self.period, self.contract_start,
+        )
+        total = Decimal("0")
+        for line in lines:
+            table.add_row(
+                line.ticket_id,
+                line.description[:55],
+                str(line.hours),
+                key=line.ticket_id,
+            )
+            total += line.hours
+        if lines:
+            table.add_row("TOTAL", "", str(total), key="__total__")
+        else:
+            table.add_row("(none)", "", "", key="__empty__")
+        table.focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "close-btn":
+            self.dismiss(None)
+
+    def action_close(self) -> None:
+        self.dismiss(None)

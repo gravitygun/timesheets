@@ -1283,6 +1283,73 @@ def get_finalised_bill_summary(
     return lines
 
 
+@dataclass
+class TicketBillLine:
+    """A single ticket entry within a deliverable's billing breakdown."""
+
+    ticket_id: str
+    description: str
+    hours: Decimal
+
+
+def get_tickets_for_deliverable_in_bill(
+    deliverable_id: str | None,
+    period: tuple[int, int] | None,
+    contract_start: date | None = None,
+) -> list[TicketBillLine]:
+    """Return tickets and their hours for one deliverable line in a bill.
+
+    If `period` is None, returns the unbilled (current) bill set: closed
+    tickets not yet billed. Otherwise returns tickets billed in the given
+    (year, month). `deliverable_id` of None matches tickets with no
+    deliverable linked (the "Unlinked" row in the parent summary).
+
+    Hours are summed from allocations the same way as
+    get_current_bill_summary / get_finalised_bill_summary so the totals
+    reconcile.
+    """
+    conn = get_connection()
+    sql = """
+        SELECT
+            t.id AS ticket_id,
+            t.description AS description,
+            SUM(CAST(ta.hours AS REAL)) AS total_hours
+        FROM ticket_allocations ta
+        JOIN tickets t ON ta.ticket_id = t.id
+        WHERE t.archived = 1
+    """
+    params: list[object] = []
+    if period is None:
+        sql += " AND t.billed = 0"
+    else:
+        year, month = period
+        sql += " AND t.billed = 1 AND t.billed_year = ? AND t.billed_month = ?"
+        params.extend([year, month])
+    if deliverable_id is None:
+        sql += " AND t.deliverable_id IS NULL"
+    else:
+        sql += " AND t.deliverable_id = ?"
+        params.append(deliverable_id)
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    sql += """
+        GROUP BY t.id
+        HAVING total_hours > 0
+        ORDER BY t.id
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [
+        TicketBillLine(
+            ticket_id=row["ticket_id"],
+            description=row["description"] or "",
+            hours=Decimal(str(row["total_hours"])).quantize(Decimal("0.01")),
+        )
+        for row in rows
+    ]
+
+
 def get_billed_points_total(
     hours_per_point: Decimal,
     up_to_year: int | None = None,

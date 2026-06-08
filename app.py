@@ -23,6 +23,7 @@ from models import Ticket, TicketAllocation, TimeEntry
 from utils import calculate_points, get_weeks_in_month
 from screens import (
     ConfirmScreen,
+    DeliverableBillTicketsScreen,
     DeliverableManagementScreen,
     EditAllocationScreen,
     EditDayScreen,
@@ -3526,6 +3527,11 @@ class TimesheetApp(App):
             else:
                 summary_parts.append("Nothing to bill right now")
 
+        if lines:
+            summary_parts.append(
+                "Press [bold]Enter[/bold] on a row to see its tickets",
+            )
+
         self.query_one("#billing-summary", Static).update("\n".join(summary_parts))
 
     def action_finalise_billing(self) -> None:
@@ -3625,6 +3631,55 @@ class TimesheetApp(App):
             if event.row_key:
                 ticket_id = str(event.row_key.value)
                 self._edit_allocation(ticket_id)
+        elif self.view_mode == "billing":
+            self._open_billing_drilldown(event.row_key)
+
+    def _open_billing_drilldown(self, row_key) -> None:
+        """Open the per-deliverable ticket breakdown modal."""
+        if not row_key:
+            return
+        key = str(row_key.value)
+        if key in ("__total__", "None"):
+            return
+        deliverable_id: str | None = None if key == "unlinked" else key
+
+        config = storage.get_config()
+        period = self.billing_view_period
+        if period is None:
+            lines = storage.get_current_bill_summary(
+                hours_per_point=config.hours_per_point,
+                point_rate=config.point_rate,
+                vat_rate=config.vat_rate,
+                contract_start=config.contract_start,
+            )
+        else:
+            year, month = period
+            lines = storage.get_bill_lines(year, month)
+            if not lines:
+                lines = storage.get_finalised_bill_summary(
+                    year=year,
+                    month=month,
+                    hours_per_point=config.hours_per_point,
+                    point_rate=config.point_rate,
+                    vat_rate=config.vat_rate,
+                    contract_start=config.contract_start,
+                )
+        title = next(
+            (
+                ln.deliverable_title
+                for ln in lines
+                if ln.deliverable_id == deliverable_id
+            ),
+            "Unlinked" if deliverable_id is None else deliverable_id or "",
+        )
+        self.push_screen(
+            DeliverableBillTicketsScreen(
+                deliverable_id=deliverable_id,
+                deliverable_title=title,
+                period=period,
+                contract_start=config.contract_start,
+            ),
+        )
 
     def action_populate_holidays(self):
         """Pre-populate UK bank holidays for the company year (year view only)."""
