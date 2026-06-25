@@ -1209,6 +1209,44 @@ def get_finalised_bills() -> list[tuple[int, int]]:
     return [(row["year"], row["month"]) for row in rows]
 
 
+def get_month_bill_points(
+    year: int,
+    month: int,
+    hours_per_point: Decimal,
+    point_rate: Decimal,
+    vat_rate: Decimal,
+    contract_start: date | None = None,
+) -> tuple[int, bool]:
+    """Points total for a month's bill, plus whether that month is finalised.
+
+    A ticket bills in the month it is closed, so this is the single
+    'what do I bill' figure - it mirrors the Billing view exactly:
+
+    - Finalised month: returns the snapshot total (or a reconstruction
+      from the tickets stamped to that period if no snapshot exists).
+    - Unfinalised month: returns the current bill - all closed-but-
+      unbilled work, i.e. what will be invoiced when the month is
+      finalised.
+
+    No booking-date or contract-to-date scoping: the figure is stable as
+    you navigate months and always agrees with the Billing screen.
+    """
+    is_finalised = (year, month) in set(get_finalised_bills())
+    if is_finalised:
+        lines = get_bill_lines(year, month)
+        if not lines:
+            lines = get_finalised_bill_summary(
+                year, month, hours_per_point, point_rate, vat_rate,
+                contract_start,
+            )
+    else:
+        lines = get_current_bill_summary(
+            hours_per_point, point_rate, vat_rate, contract_start,
+        )
+    total = int(sum((line.points for line in lines), Decimal("0")))
+    return total, is_finalised
+
+
 def get_billed_tickets_for_period(year: int, month: int) -> list[Ticket]:
     """Get all tickets that were billed in the given period."""
     conn = get_connection()
@@ -1393,105 +1431,6 @@ def get_billed_points_total(
     row = conn.execute(sql, params).fetchone()
     conn.close()
     return Decimal(row["total"])
-
-
-def get_monthly_points_breakdown(
-    year: int,
-    month: int,
-    hours_per_point: Decimal,
-) -> tuple[int, int, int]:
-    """Get points breakdown for work done in a single month.
-
-    Returns (billed_points, billable_points, speculative_points):
-    - billed: closed and already billed
-    - billable: closed but not yet billed
-    - speculative: still open
-
-    Hours are bucketed by (deliverable, status) and ceiling-rounded per
-    bucket - matching the per-deliverable rounding used by the billing
-    view. Per-ticket rounding here would over-count whenever several
-    tickets share a deliverable (each <hours_per_point remainder rounds
-    up independently) and the bottom-line would not reconcile with the
-    actual bill.
-    """
-    from calendar import monthrange
-
-    start = date(year, month, 1)
-    end = date(year, month, monthrange(year, month)[1])
-    conn = get_connection()
-    rows = conn.execute(
-        """
-        SELECT t.archived, t.billed, t.deliverable_id,
-               SUM(CAST(ta.hours AS REAL)) as total
-        FROM ticket_allocations ta
-        JOIN tickets t ON ta.ticket_id = t.id
-        WHERE ta.date >= ? AND ta.date <= ?
-        GROUP BY t.deliverable_id, t.archived, t.billed
-        """,
-        (start.isoformat(), end.isoformat()),
-    ).fetchall()
-    conn.close()
-
-    billed = 0
-    billable = 0
-    speculative = 0
-    for row in rows:
-        hours = Decimal(str(row["total"]))
-        pts = int((hours / hours_per_point).to_integral_value(rounding=ROUND_CEILING))
-        if row["archived"] and row["billed"]:
-            billed += pts
-        elif row["archived"]:
-            billable += pts
-        else:
-            speculative += pts
-    return billed, billable, speculative
-
-
-def get_points_by_status(
-    hours_per_point: Decimal,
-    contract_start: date | None = None,
-) -> tuple[int, int, int]:
-    """Total points by status: (billed, billable, speculative).
-
-    Hours are summed per (deliverable, status) bucket and rounded per
-    bucket - matching the per-deliverable rounding used in the billing
-    view. This is the truthful billing figure and avoids the inflation
-    you get when you round per ticket and then sum.
-    """
-    conn = get_connection()
-    sql = """
-        SELECT
-            t.deliverable_id,
-            t.archived,
-            t.billed,
-            SUM(CAST(ta.hours AS REAL)) as total_hours
-        FROM ticket_allocations ta
-        JOIN tickets t ON ta.ticket_id = t.id
-        WHERE 1=1
-    """
-    params: list[object] = []
-    if contract_start is not None:
-        sql += " AND ta.date >= ?"
-        params.append(contract_start.isoformat())
-    sql += " GROUP BY t.deliverable_id, t.archived, t.billed"
-    rows = conn.execute(sql, params).fetchall()
-    conn.close()
-
-    billed = 0
-    billable = 0
-    speculative = 0
-    for row in rows:
-        hours = Decimal(str(row["total_hours"]))
-        pts = int((hours / hours_per_point).to_integral_value(
-            rounding=ROUND_CEILING,
-        ))
-        if row["archived"] and row["billed"]:
-            billed += pts
-        elif row["archived"]:
-            billable += pts
-        else:
-            speculative += pts
-    return billed, billable, speculative
 
 
 def get_carryover_tickets(

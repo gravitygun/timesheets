@@ -42,6 +42,52 @@ max_hours = (weekdays × 7.5h) - public_holiday_adjustment_hours
 
 Only `P` type adjustments reduce max hours.
 
+### Billing & Points Model
+
+This is the rule every billing/points figure in the UI must obey. It was
+reworked on 2026-06-25 after the on-screen numbers disagreed with each
+other and with the Billing view; read this before touching any points or
+£ display.
+
+**A ticket bills in the month it is closed (archived), as a whole.** Its
+points come from *all* its hours, regardless of which months those hours
+were booked in. When you close it and finalise that month's bill, the
+ticket is stamped `billed_year`/`billed_month` and a `bill_lines` snapshot
+is written.
+
+So "what do I bill for month X?" has exactly one answer, and there is one
+helper for it:
+
+```python
+storage.get_month_bill_points(year, month, hours_per_point,
+                              point_rate, vat_rate, contract_start)
+    -> (points: int, is_finalised: bool)
+```
+
+- **Finalised month** → its snapshot total (`get_bill_lines`, or a
+  reconstruction via `get_finalised_bill_summary`). Label it **"Billed"**.
+- **Unfinalised month** → the current pending bill (`get_current_bill_summary`
+  = all closed-but-unbilled work). Label it **"To bill"**.
+
+Rounding is **per deliverable** (ceiling), because the deliverable is the
+invoiced unit. This figure is stable as you navigate months and always
+equals the Billing view for the same period.
+
+**Do NOT reintroduce these — they were deliberately deleted as confusing
+and wrong, and they are what caused the disagreeing numbers:**
+
+- month-scoped-by-booking-date points ("points from hours *booked* in this
+  calendar month") — was `get_monthly_points_breakdown`
+- contract-to-date status totals + an "inc N from previous months"
+  parenthetical — was `get_points_by_status`
+- a separate "Speculative" (open-ticket) figure in the allocations bar or
+  the month/year earnings panels
+
+The **per-row "Pts" column** in the allocations table is the one exception:
+it intentionally shows each ticket's *lifetime* points with *per-ticket*
+rounding — a "how big is this ticket" gauge, NOT a bill total, so it will
+not (and should not) sum to the bill.
+
 ## Files
 
 - `app.py` - Main TUI application using Textual framework

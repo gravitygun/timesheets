@@ -1107,12 +1107,15 @@ class TimesheetApp(App):
             month_earnings.remove_class("hidden")
             earnings_text = Text()
 
-            # Points breakdown for this month
-            billed_pts, billable_pts, speculative_pts = (
-                storage.get_monthly_points_breakdown(
-                    self.current_year, self.current_month, config.hours_per_point,
-                )
+            # This month's bill - what was billed (finalised) or will be
+            # billed (current). The single figure that matches the Billing
+            # view; a ticket cashes in the month it closes.
+            bill_pts, bill_finalised = storage.get_month_bill_points(
+                self.current_year, self.current_month,
+                config.hours_per_point, config.point_rate, config.vat_rate,
+                contract_start=config.contract_start,
             )
+            bill_label = "Billed" if bill_finalised else "To bill"
 
             # Contract year runs Apr-Mar
             cy_start = config.contract_start
@@ -1158,42 +1161,19 @@ class TimesheetApp(App):
                 f"              Contract year: {int(ytd_pts)} pts billed"
                 f"  |  This month: {budget_str}\n",
             )
+            earnings_text.append("              ")
             earnings_text.append(
-                "              This month: ",
+                f"{bill_label} this month: {bill_pts} pts", style="bold green",
             )
-            earnings_text.append(f"{billed_pts} pts billed", style="bold green")
-            if billable_pts > 0:
-                earnings_text.append("  +  ")
-                earnings_text.append(
-                    f"{billable_pts} pts billable", style="bold yellow",
-                )
-            if speculative_pts > 0:
-                earnings_text.append("  +  ")
-                earnings_text.append(f"{speculative_pts} pts speculative", style="dim")
 
             # Financial details only when $ toggled
-            if self.show_money:
-                if billed_pts > 0:
-                    billed_ex = billed_pts * config.point_rate
-                    billed_inc = billed_ex * (1 + config.vat_rate)
-                    earnings_text.append(
-                        f"\n              Billed: £{float(billed_ex):,.2f}"
-                        f" ex VAT  (£{float(billed_inc):,.2f} inc VAT)",
-                    )
-                if billable_pts > 0:
-                    bill_ex = billable_pts * config.point_rate
-                    bill_inc = bill_ex * (1 + config.vat_rate)
-                    earnings_text.append(
-                        f"\n              Billable: £{float(bill_ex):,.2f}"
-                        f" ex VAT  (£{float(bill_inc):,.2f} inc VAT)",
-                    )
-                if speculative_pts > 0:
-                    spec_ex = speculative_pts * config.point_rate
-                    spec_inc = spec_ex * (1 + config.vat_rate)
-                    earnings_text.append(
-                        f"\n              Speculative: £{float(spec_ex):,.2f}"
-                        f" ex VAT  (£{float(spec_inc):,.2f} inc VAT)",
-                    )
+            if self.show_money and bill_pts > 0:
+                bill_ex = bill_pts * config.point_rate
+                bill_inc = bill_ex * (1 + config.vat_rate)
+                earnings_text.append(
+                    f"\n              {bill_label}: £{float(bill_ex):,.2f}"
+                    f" ex VAT  (£{float(bill_inc):,.2f} inc VAT)",
+                )
 
             month_earnings.update(earnings_text)
         else:
@@ -1348,11 +1328,19 @@ class TimesheetApp(App):
             if self.show_money:
                 month_start = date(year, month, 1)
                 if config.contract_start and month_start >= config.contract_start:
-                    # Points-based billing: billed + billable (closed) earns points
-                    billed_p, billable_p, _ = storage.get_monthly_points_breakdown(
+                    # Points-based billing = that month's bill. Finalised
+                    # months show the actual invoice; the current month
+                    # shows the pending bill; future months show nothing.
+                    bill_p, fin = storage.get_month_bill_points(
                         year, month, config.hours_per_point,
+                        config.point_rate, config.vat_rate,
+                        contract_start=config.contract_start,
                     )
-                    billable = Decimal(billed_p + billable_p) * config.point_rate
+                    is_current = (year, month) == (
+                        self.current_year, self.current_month,
+                    )
+                    month_pts = bill_p if (fin or is_current) else 0
+                    billable = Decimal(month_pts) * config.point_rate
                 else:
                     # Hourly billing
                     billable = totals['worked'] * config.hourly_rate
@@ -1426,19 +1414,10 @@ class TimesheetApp(App):
             year_earnings.remove_class("hidden")
             earnings_text = Text()
 
-            # Sum billed/billable/speculative points across the company year
-            year_billed_pts = 0
-            year_billable_pts = 0
-            year_speculative_pts = 0
-            for y, m in months:
-                bd, b, s = storage.get_monthly_points_breakdown(
-                    y, m, config.hours_per_point,
-                )
-                year_billed_pts += bd
-                year_billable_pts += b
-                year_speculative_pts += s
-
-            # YTD against annual max (true billed only)
+            # Billed so far this contract year (against the annual cap),
+            # plus what's pending on the current, not-yet-finalised bill.
+            # A ticket bills in the month it closes, so open work isn't
+            # counted until then. Mirrors the Billing view.
             ytd_pts = storage.get_billed_points_total(
                 config.hours_per_point,
                 up_to_year=self.current_year,
@@ -1446,46 +1425,38 @@ class TimesheetApp(App):
                 contract_start=config.contract_start,
             )
             annual_remaining = config.annual_max_points - int(ytd_pts)
+            pending_lines = storage.get_current_bill_summary(
+                config.hours_per_point, config.point_rate, config.vat_rate,
+                contract_start=config.contract_start,
+            )
+            to_bill_pts = int(
+                sum((line.points for line in pending_lines), Decimal("0"))
+            )
 
             earnings_text.append(
                 f"              Year-to-date: {int(ytd_pts)} pts billed"
                 f"  |  Annual max: {config.annual_max_points} pts"
                 f"  |  Remaining: {annual_remaining} pts\n",
             )
+            earnings_text.append("              Current bill (pending): ")
             earnings_text.append(
-                "              Year total: ",
+                f"{to_bill_pts} pts to bill", style="bold yellow",
             )
-            earnings_text.append(f"{year_billed_pts} pts billed", style="bold green")
-            if year_billable_pts > 0:
-                earnings_text.append("  +  ")
-                earnings_text.append(
-                    f"{year_billable_pts} pts billable", style="bold yellow",
-                )
-            if year_speculative_pts > 0:
-                earnings_text.append("  +  ")
-                earnings_text.append(f"{year_speculative_pts} pts speculative", style="dim")
 
             if self.show_money:
-                if year_billed_pts > 0:
-                    billed_ex = year_billed_pts * config.point_rate
+                if int(ytd_pts) > 0:
+                    billed_ex = int(ytd_pts) * config.point_rate
                     billed_inc = billed_ex * (1 + config.vat_rate)
                     earnings_text.append(
-                        f"\n              Billed: £{float(billed_ex):,.2f}"
+                        f"\n              Billed YTD: £{float(billed_ex):,.2f}"
                         f" ex VAT  (£{float(billed_inc):,.2f} inc VAT)",
                     )
-                if year_billable_pts > 0:
-                    bill_ex = year_billable_pts * config.point_rate
+                if to_bill_pts > 0:
+                    bill_ex = to_bill_pts * config.point_rate
                     bill_inc = bill_ex * (1 + config.vat_rate)
                     earnings_text.append(
-                        f"\n              Billable: £{float(bill_ex):,.2f}"
+                        f"\n              To bill: £{float(bill_ex):,.2f}"
                         f" ex VAT  (£{float(bill_inc):,.2f} inc VAT)",
-                    )
-                if year_speculative_pts > 0:
-                    spec_ex = year_speculative_pts * config.point_rate
-                    spec_inc = spec_ex * (1 + config.vat_rate)
-                    earnings_text.append(
-                        f"\n              Speculative: £{float(spec_ex):,.2f}"
-                        f" ex VAT  (£{float(spec_inc):,.2f} inc VAT)",
                     )
 
             year_earnings.update(earnings_text)
@@ -1917,28 +1888,22 @@ class TimesheetApp(App):
         entered_cell.append(f"{float(month_entered):>6g}", style=entered_style)
         week_total_row.append(entered_cell)
 
-        # Points totals for summary rows — scoped to the month being viewed
-        # so the green total reflects the bill for this month, not the
-        # whole contract.
-        billed_pts = 0
-        billable_pts = 0
-        speculative_pts = 0
+        # Points total for the summary rows is simply this month's bill,
+        # mirroring the Billing view: a ticket cashes in the month it is
+        # closed, so the figure is "what was billed" (finalised month) or
+        # "what will be billed" (current month). Stable across navigation -
+        # no booking-date or contract-to-date scoping.
+        bill_pts = 0
+        bill_finalised = False
         if show_points:
-            billed_pts, billable_pts, speculative_pts = (
-                storage.get_monthly_points_breakdown(
-                    self.current_year,
-                    self.current_month,
-                    config.hours_per_point,
-                )
+            bill_pts, bill_finalised = storage.get_month_bill_points(
+                self.current_year, self.current_month,
+                config.hours_per_point, config.point_rate, config.vat_rate,
+                contract_start=config.contract_start,
             )
-
             worked_row.append(Text(""))
             status_row.append(Text(""))
-            pts_summary = Text()
-            total_committed = billed_pts + billable_pts
-            pts_summary.append(f"{total_committed}", style="bold green")
-            pts_summary.append(f"/{speculative_pts}", style="dim")
-            week_total_row.append(pts_summary)
+            week_total_row.append(Text(str(bill_pts), style="bold green"))
 
         table.add_row(*worked_row, key="__worked__")
         table.add_row(*status_row, key="__status__")
@@ -1966,9 +1931,8 @@ class TimesheetApp(App):
         if mismatch_days > 0:
             text.append(f"   Mismatched days: {mismatch_days}", style="red")
         if show_points:
-            text.append(f"   Billable: {billable_pts} pts", style="bold green")
-            if speculative_pts > 0:
-                text.append(f"   Speculative: {speculative_pts} pts", style="dim")
+            bill_label = "Billed" if bill_finalised else "To bill"
+            text.append(f"   {bill_label}: {bill_pts} pts", style="bold green")
         alloc_summary.update(text)
 
     def _has_allocation_mismatch(self, d: date, entries_dict: dict) -> bool:

@@ -1350,30 +1350,83 @@ class TestCarryoverTickets:
         assert carryover == []
 
 
-class TestMonthlyPointsBreakdown:
-    def test_three_categories(self, temp_database):
+class TestMonthBillPoints:
+    """get_month_bill_points is the single 'what do I bill' figure shared by
+    the allocations summary, the month/year earnings panels, and the Billing
+    view. A ticket bills in the month it closes: a finalised month returns
+    its snapshot; an unfinalised month returns the current (pending) bill.
+    The figure must be stable as you navigate months - no booking-date or
+    contract-to-date scoping.
+    """
+
+    _RATES = dict(
+        hours_per_point=Decimal("2"),
+        point_rate=Decimal("200"),
+        vat_rate=Decimal("0.2"),
+    )
+
+    def test_unfinalised_month_is_current_bill_full_hours(self, temp_database):
         storage = temp_database
-        # Billed
+        # One closed-but-unbilled ticket worked across two months. The bill
+        # counts the whole 8.75h (it cashes in when closed), not just one
+        # month's slice.
         storage.save_ticket(Ticket(
-            id="BD", description="b", archived=True,
-            billed=True, billed_year=2026, billed_month=4,
+            id="CL", description="c", archived=True, deliverable_id="WP5a-D2",
         ))
-        # Closed but unbilled
-        storage.save_ticket(Ticket(id="CL", description="c", archived=True))
-        # Open
-        storage.save_ticket(Ticket(id="OP", description="o"))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="CL", date=date(2026, 5, 20), hours=Decimal("5.75"),
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="CL", date=date(2026, 6, 10), hours=Decimal("3.0"),
+        ))
 
-        for tid in ("BD", "CL", "OP"):
-            storage.save_allocation(TicketAllocation(
-                ticket_id=tid, date=date(2026, 4, 1), hours=Decimal("4"),
-            ))
-
-        billed, billable, speculative = storage.get_monthly_points_breakdown(
-            2026, 4, Decimal("2"),
+        cs = date(2026, 4, 1)
+        pts, finalised = storage.get_month_bill_points(
+            2026, 6, contract_start=cs, **self._RATES,
         )
-        assert billed == 2
-        assert billable == 2
-        assert speculative == 2
+        assert finalised is False
+        assert pts == 5  # ceil(8.75 / 2), full hours - not June's 3h slice
+
+        # It equals the Billing view's current-bill total exactly.
+        bill_lines = storage.get_current_bill_summary(
+            contract_start=cs, **self._RATES,
+        )
+        assert pts == int(sum(line.points for line in bill_lines))
+
+    def test_stable_across_months_and_snapshots_finalised(self, temp_database):
+        storage = temp_database
+        storage.save_ticket(Ticket(
+            id="CL", description="c", archived=True, deliverable_id="WP5a-D2",
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="CL", date=date(2026, 5, 20), hours=Decimal("5.75"),
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="CL", date=date(2026, 6, 10), hours=Decimal("3.0"),
+        ))
+        cs = date(2026, 4, 1)
+
+        # Before finalising, the same pending bill shows on any unfinalised
+        # month - no wild swings when navigating to May or April.
+        for month in (4, 5, 6):
+            pts, finalised = storage.get_month_bill_points(
+                2026, month, contract_start=cs, **self._RATES,
+            )
+            assert (pts, finalised) == (5, False)
+
+        # Finalise June: the ticket is now stamped to June.
+        storage.finalise_bill(2026, 6, contract_start=cs, **self._RATES)
+
+        pts_jun, fin_jun = storage.get_month_bill_points(
+            2026, 6, contract_start=cs, **self._RATES,
+        )
+        assert (pts_jun, fin_jun) == (5, True)  # June's snapshot
+
+        # Nothing left to bill, so other months read zero / not finalised.
+        pts_may, fin_may = storage.get_month_bill_points(
+            2026, 5, contract_start=cs, **self._RATES,
+        )
+        assert (pts_may, fin_may) == (0, False)
 
 
 class TestContractConfig:
