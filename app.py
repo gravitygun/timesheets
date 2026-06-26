@@ -157,6 +157,30 @@ def _check_git_status() -> GitStatus:
 class TimesheetDataTable(DataTable):
     """Custom DataTable that delegates left/right keys to the app for navigation in week/month/day views."""
 
+    COMPONENT_CLASSES = DataTable.COMPONENT_CLASSES | {
+        "datatable--cell-row-highlight"
+    }
+
+    def _get_row_style(self, row_index: int, base_style):
+        """Tint the whole cursor row in cell-cursor mode (allocations view).
+
+        Row-cursor tables already highlight the full row; in cell mode only
+        the single cell is lit, so we add a dark-grey wash across the cursor's
+        row for visibility. The cell cursor itself still renders on top, so the
+        selected cell stays prominently highlighted.
+        """
+        row_style = super()._get_row_style(row_index, base_style)
+        if (
+            self.cursor_type == "cell"
+            and self.show_cursor
+            and row_index >= 0
+            and row_index == self.cursor_coordinate.row
+        ):
+            row_style += self.get_component_styles(
+                "datatable--cell-row-highlight"
+            ).rich_style
+        return row_style
+
     def on_key(self, event) -> None:
         """Handle key events - intercept left/right in week/month/day views, 'c' in allocations."""
         if not hasattr(self.app, 'view_mode'):
@@ -375,6 +399,10 @@ class TimesheetApp(App):
 
     DataTable > .datatable--cursor {
         background: $secondary;
+    }
+
+    TimesheetDataTable > .datatable--cell-row-highlight {
+        background: $boost;
     }
     """
 
