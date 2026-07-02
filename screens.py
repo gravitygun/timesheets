@@ -8,12 +8,13 @@ from decimal import Decimal
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.coordinate import Coordinate
 from textual.widgets import Button, Checkbox, DataTable, Input, Label, TextArea
 from textual.screen import ModalScreen
 
-from models import Ticket, TicketAllocation, TimeEntry
+import invoice
+from models import InvoiceSettings, Ticket, TicketAllocation, TimeEntry
 import storage
 
 
@@ -1927,6 +1928,327 @@ class ExportAllocationsScreen(ModalScreen[str | None]):
             self.app.notify(f"Failed to write file: {exc}", severity="error")
             return
 
+        self.dismiss(str(output))
+
+
+class InvoiceSettingsScreen(ModalScreen[bool]):
+    """Edit the fixed company / customer / bank details used on invoices."""
+
+    CSS = """
+    InvoiceSettingsScreen {
+        align: center middle;
+    }
+
+    #invoice-settings-dialog {
+        width: 76;
+        height: auto;
+        max-height: 90%;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    #invoice-settings-scroll {
+        height: auto;
+        max-height: 30;
+    }
+
+    #invoice-settings-scroll Label {
+        margin-top: 1;
+        color: $text-muted;
+    }
+
+    #invoice-settings-scroll Input {
+        width: 100%;
+    }
+
+    #invoice-settings-scroll TextArea {
+        width: 100%;
+        height: 4;
+    }
+
+    #invoice-settings-buttons {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+
+    #invoice-settings-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.settings = storage.get_invoice_settings()
+
+    def compose(self) -> ComposeResult:
+        s = self.settings
+        with Vertical(id="invoice-settings-dialog"):
+            yield Label("Invoice Details", id="invoice-settings-title")
+            with VerticalScroll(id="invoice-settings-scroll"):
+                yield Label("Company name:")
+                yield Input(value=s.company_name, id="company_name")
+                yield Label("Company address (one line each):")
+                yield TextArea(text=s.company_address, id="company_address")
+                yield Label("Company postcode:")
+                yield Input(value=s.company_postcode, id="company_postcode")
+                yield Label("VAT number:")
+                yield Input(value=s.company_vat_number, id="company_vat_number")
+                yield Label("Company registration number:")
+                yield Input(value=s.company_reg_number, id="company_reg_number")
+                yield Label("Bank sort code:")
+                yield Input(value=s.bank_sort_code, id="bank_sort_code")
+                yield Label("Bank account number:")
+                yield Input(value=s.bank_account_number, id="bank_account_number")
+                yield Label("Customer name:")
+                yield Input(value=s.customer_name, id="customer_name")
+                yield Label("Customer address (one line each):")
+                yield TextArea(text=s.customer_address, id="customer_address")
+                yield Label("Customer postcode:")
+                yield Input(value=s.customer_postcode, id="customer_postcode")
+                yield Label("Contract/PO:")
+                yield Input(value=s.contract_po, id="contract_po")
+            with Horizontal(id="invoice-settings-buttons"):
+                yield Button("Save", variant="primary", id="save")
+                yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#company_name", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(False)
+        elif event.button.id == "save":
+            self._save()
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def _save(self) -> None:
+        def field(fid: str) -> str:
+            return self.query_one(f"#{fid}", Input).value.strip()
+
+        updated = InvoiceSettings(
+            company_name=field("company_name"),
+            company_address=self.query_one(
+                "#company_address", TextArea
+            ).text.strip(),
+            company_postcode=field("company_postcode"),
+            company_vat_number=field("company_vat_number"),
+            company_reg_number=field("company_reg_number"),
+            bank_sort_code=field("bank_sort_code"),
+            bank_account_number=field("bank_account_number"),
+            customer_name=field("customer_name"),
+            customer_address=self.query_one(
+                "#customer_address", TextArea
+            ).text.strip(),
+            customer_postcode=field("customer_postcode"),
+            contract_po=field("contract_po"),
+            # Preserve the running invoice number; it's managed elsewhere.
+            last_invoice_number=self.settings.last_invoice_number,
+        )
+        storage.save_invoice_settings(updated)
+        self.app.notify("Invoice details saved")
+        self.dismiss(True)
+
+
+class GenerateInvoiceScreen(ModalScreen[str | None]):
+    """Collect invoice number/date/output path, then write the HTML invoice.
+
+    ``lines`` are the per-deliverable bill lines for the period being invoiced
+    (the same rows the Billing view shows). ``default_year``/``default_month``
+    seed the services-delivered month and the output filename.
+    """
+
+    CSS = """
+    GenerateInvoiceScreen {
+        align: center middle;
+    }
+
+    #invoice-dialog {
+        width: 72;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    #invoice-dialog Label {
+        margin-bottom: 1;
+    }
+
+    #invoice-dialog Input {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    #invoice-buttons {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+
+    #invoice-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(
+        self,
+        lines: list,
+        point_rate: Decimal,
+        vat_rate: Decimal,
+        default_year: int,
+        default_month: int,
+    ) -> None:
+        super().__init__()
+        self.lines = lines
+        self.point_rate = point_rate
+        self.vat_rate = vat_rate
+        self.default_year = default_year
+        self.default_month = default_month
+        self.settings = storage.get_invoice_settings()
+
+    def _default_path(self, number: int, year: int, month: int) -> str:
+        from pathlib import Path
+
+        return str(
+            Path.home() / f"invoice-{number:03d}-{year}-{month:02d}.html"
+        )
+
+    def compose(self) -> ComposeResult:
+        next_number = self.settings.last_invoice_number + 1
+        today = date.today()
+        with Vertical(id="invoice-dialog"):
+            yield Label("Generate Invoice")
+            yield Label("Invoice number:")
+            yield Input(value=str(next_number), id="invoice-number")
+            yield Label("Invoice date (YYYY-MM-DD):")
+            yield Input(value=today.isoformat(), id="invoice-date")
+            yield Label("Services delivered (YYYY-MM):")
+            yield Input(
+                value=f"{self.default_year}-{self.default_month:02d}",
+                id="services-month",
+            )
+            yield Label("Output file:")
+            yield Input(
+                value=self._default_path(
+                    next_number, self.default_year, self.default_month
+                ),
+                id="invoice-path",
+            )
+            with Horizontal(id="invoice-buttons"):
+                yield Button("Generate", variant="primary", id="generate")
+                yield Button("Company details…", id="settings")
+                yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#invoice-number", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Keep the default filename in step with number and services month."""
+        if event.input.id not in ("invoice-number", "services-month"):
+            return
+        try:
+            number = int(self.query_one("#invoice-number", Input).value.strip())
+        except ValueError:
+            return
+        month_str = self.query_one("#services-month", Input).value.strip()
+        try:
+            year_s, month_s = month_str.split("-")
+            year, month = int(year_s), int(month_s)
+        except (ValueError, IndexError):
+            return
+        path_input = self.query_one("#invoice-path", Input)
+        # Only auto-update while the path still looks like the default pattern,
+        # so a manually chosen path is left alone.
+        if "invoice-" in path_input.value:
+            path_input.value = self._default_path(number, year, month)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "settings":
+            self._edit_settings()
+        elif event.button.id == "generate":
+            self._generate()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _edit_settings(self) -> None:
+        def _reload(_saved: bool | None) -> None:
+            # Pick up any edits (e.g. changed bank details) for this invoice.
+            self.settings = storage.get_invoice_settings()
+
+        self.app.push_screen(InvoiceSettingsScreen(), _reload)
+
+    def _generate(self) -> None:
+        number_str = self.query_one("#invoice-number", Input).value.strip()
+        date_str = self.query_one("#invoice-date", Input).value.strip()
+        month_str = self.query_one("#services-month", Input).value.strip()
+        path_str = self.query_one("#invoice-path", Input).value.strip()
+
+        try:
+            number = int(number_str)
+            if number < 0:
+                raise ValueError
+        except ValueError:
+            self.app.notify("Invalid invoice number", severity="error")
+            return
+
+        try:
+            invoice_date = date.fromisoformat(date_str)
+        except ValueError:
+            self.app.notify("Invalid invoice date (use YYYY-MM-DD)", severity="error")
+            return
+
+        try:
+            year_s, month_s = month_str.split("-")
+            services_month = date(int(year_s), int(month_s), 1)
+        except (ValueError, IndexError):
+            self.app.notify(
+                "Invalid services month (use YYYY-MM)", severity="error"
+            )
+            return
+
+        if not path_str:
+            self.app.notify("Output file is required", severity="error")
+            return
+
+        from pathlib import Path
+
+        output = Path(path_str).expanduser()
+        due_date = invoice_date + timedelta(days=30)
+
+        html = invoice.render_invoice_html(
+            self.settings,
+            self.lines,
+            invoice_number=number,
+            invoice_date=invoice_date,
+            due_date=due_date,
+            services_month=services_month,
+            point_rate=self.point_rate,
+            vat_rate=self.vat_rate,
+        )
+
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(html, encoding="utf-8")
+        except OSError as exc:
+            self.app.notify(f"Failed to write file: {exc}", severity="error")
+            return
+
+        storage.bump_invoice_number(number)
         self.dismiss(str(output))
 
 

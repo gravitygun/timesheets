@@ -107,3 +107,26 @@ class MonthlyBilling:
     year: int
     month: int
     finalised: bool = False
+
+
+@dataclass
+class InvoiceSettings:
+    """Fixed 'who's billing whom' details for generating invoices.
+
+    Single company / single customer only (current situation). Defaults are
+    seeded from the existing paper invoices so the form is usable immediately.
+    Address fields are multi-line, newline-separated.
+    """
+
+    company_name: str = "BLITTERBYTE CONSULTING LIMITED"
+    company_address: str = "1 Cedar Office Park\nCobham Road\nWimborne"
+    company_postcode: str = "BH21 7SB"
+    company_vat_number: str = "477154076"
+    company_reg_number: str = "15953233"
+    bank_sort_code: str = "040333"
+    bank_account_number: str = "17169396"
+    customer_name: str = "LA International Accounts Payable"
+    customer_address: str = "International House\nFestival Way\nStoke-on-Trent"
+    customer_postcode: str = "ST1 5UB"
+    contract_po: str = "127127"
+    last_invoice_number: int = 0

@@ -958,6 +958,84 @@ class TestGetBillableTickets:
         assert {t.id for t in billable} == {"CLOSED"}
 
 
+class TestCurrentBillDeliveryMonth:
+    def test_none_when_no_billable_work(self, temp_database):
+        storage = temp_database
+        assert storage.get_current_bill_delivery_month() is None
+
+    def test_returns_latest_allocation_month(self, temp_database):
+        storage = temp_database
+        storage.save_ticket(Ticket(id="C", description="c", archived=True))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="C", date=date(2026, 6, 3), hours=Decimal("4"),
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="C", date=date(2026, 6, 27), hours=Decimal("3"),
+        ))
+        # Latest allocation is 27 June -> first of June.
+        assert storage.get_current_bill_delivery_month() == date(2026, 6, 1)
+
+    def test_ignores_open_and_billed_tickets(self, temp_database):
+        storage = temp_database
+        storage.save_ticket(Ticket(id="OPEN", description="o"))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="OPEN", date=date(2026, 7, 15), hours=Decimal("5"),
+        ))
+        storage.save_ticket(Ticket(
+            id="BILLED", description="b", archived=True,
+            billed=True, billed_year=2026, billed_month=5,
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="BILLED", date=date(2026, 8, 1), hours=Decimal("5"),
+        ))
+        storage.save_ticket(Ticket(id="C", description="c", archived=True))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="C", date=date(2026, 6, 10), hours=Decimal("4"),
+        ))
+        # Only the closed-unbilled ticket counts -> June.
+        assert storage.get_current_bill_delivery_month() == date(2026, 6, 1)
+
+
+class TestFinalisedBillDeliveryMonth:
+    def test_none_when_period_has_no_work(self, temp_database):
+        storage = temp_database
+        assert storage.get_finalised_bill_delivery_month(2026, 7) is None
+
+    def test_uses_work_dates_not_billed_stamp(self, temp_database):
+        storage = temp_database
+        # Work done in June, but the bill was raised (stamped) in July.
+        storage.save_ticket(Ticket(
+            id="J", description="june work", archived=True,
+            billed=True, billed_year=2026, billed_month=7,
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="J", date=date(2026, 6, 5), hours=Decimal("4"),
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="J", date=date(2026, 6, 30), hours=Decimal("3"),
+        ))
+        assert storage.get_finalised_bill_delivery_month(2026, 7) == date(2026, 6, 1)
+
+    def test_scoped_to_the_billed_period(self, temp_database):
+        storage = temp_database
+        storage.save_ticket(Ticket(
+            id="MAY", description="m", archived=True,
+            billed=True, billed_year=2026, billed_month=6,
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="MAY", date=date(2026, 5, 20), hours=Decimal("4"),
+        ))
+        storage.save_ticket(Ticket(
+            id="JUN", description="j", archived=True,
+            billed=True, billed_year=2026, billed_month=7,
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="JUN", date=date(2026, 6, 10), hours=Decimal("4"),
+        ))
+        assert storage.get_finalised_bill_delivery_month(2026, 6) == date(2026, 5, 1)
+        assert storage.get_finalised_bill_delivery_month(2026, 7) == date(2026, 6, 1)
+
+
 _RATES = {
     "hours_per_point": Decimal("2"),
     "point_rate": Decimal("100"),

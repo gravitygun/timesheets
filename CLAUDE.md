@@ -49,11 +49,19 @@ reworked on 2026-06-25 after the on-screen numbers disagreed with each
 other and with the Billing view; read this before touching any points or
 £ display.
 
-**A ticket bills in the month it is closed (archived), as a whole.** Its
+**A ticket bills in the bill it is finalised into, as a whole.** Its
 points come from *all* its hours, regardless of which months those hours
-were booked in. When you close it and finalise that month's bill, the
-ticket is stamped `billed_year`/`billed_month` and a `bill_lines` snapshot
-is written.
+were booked in. When you finalise a bill the ticket is stamped
+`billed_year`/`billed_month` and a `bill_lines` snapshot is written.
+
+The billed month is chosen at finalise time (editable in `FinaliseBillScreen`)
+and **defaults to the month the work was actually delivered** — the latest
+allocation date across the pending bill (`get_current_bill_delivery_month`),
+*not* today. This stops a bill finalised on the 1st/2nd of the next month
+from being stamped into that month. The invoice's "services delivered" line
+is derived the same way (`get_current_bill_delivery_month` /
+`get_finalised_bill_delivery_month`), so even a mis-stamped bill invoices
+against the right month.
 
 So "what do I bill for month X?" has exactly one answer, and there is one
 helper for it:

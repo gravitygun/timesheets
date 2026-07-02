@@ -30,6 +30,8 @@ from screens import (
     EditTicketScreen,
     ExportAllocationsScreen,
     FinaliseBillScreen,
+    GenerateInvoiceScreen,
+    InvoiceSettingsScreen,
     MoveAllocationScreen,
     TicketManagementScreen,
     TicketSelectScreen,
@@ -442,6 +444,8 @@ class TimesheetApp(App):
         Binding("D", "manage_deliverables", "Deliverables"),
         Binding("B", "billing_view", "Billing"),
         Binding("f", "finalise_billing", "Finalise"),
+        Binding("i", "generate_invoice", "Invoice"),
+        Binding("I", "invoice_settings", "Inv Setup"),
     ]
 
     def __init__(self):
@@ -2109,6 +2113,9 @@ class TimesheetApp(App):
         # Billing view only — only when viewing the current (unbilled) bill
         elif action == "finalise_billing":
             return (mode == "billing" and self.billing_view_period is None) or False
+        # Invoice generation — any bill on screen (current or finalised)
+        elif action == "generate_invoice":
+            return mode == "billing" or False
 
         # Ticket/deliverable management — always available
         elif action == "manage_tickets":
@@ -3548,7 +3555,13 @@ class TimesheetApp(App):
         total_inc = sum((ln.amount_inc_vat for ln in lines), Decimal("0"))
         total_inc_str = f"£{total_inc:,.2f}"
 
-        today = date.today()
+        # Default the bill's month to when the work was actually done (latest
+        # allocation), not today - finalising on the 1st or 2nd of the next
+        # month shouldn't stamp the bill into that month. Falls back to today
+        # only if the pending bill has no datable work.
+        default_month = storage.get_current_bill_delivery_month(
+            contract_start=config.contract_start,
+        ) or date.today()
 
         def handle_result(result: tuple[int, int] | None) -> None:
             if result is None:
@@ -3569,7 +3582,79 @@ class TimesheetApp(App):
             self._refresh_billing_display()
 
         self.push_screen(
-            FinaliseBillScreen(today.year, today.month, ticket_count, total_inc_str),
+            FinaliseBillScreen(
+                default_month.year, default_month.month,
+                ticket_count, total_inc_str,
+            ),
+            handle_result,
+        )
+
+    def action_invoice_settings(self) -> None:
+        """Open the invoice company/customer details editor."""
+        self.push_screen(InvoiceSettingsScreen())
+
+    def action_generate_invoice(self) -> None:
+        """Generate an HTML invoice for the bill currently on screen."""
+        if self.view_mode != "billing":
+            return
+
+        config = storage.get_config()
+        period = self.billing_view_period
+
+        # Mirror _refresh_billing_display's source selection exactly so the
+        # invoice lines match what's shown in the Billing table.
+        if period is None:
+            lines = storage.get_current_bill_summary(
+                hours_per_point=config.hours_per_point,
+                point_rate=config.point_rate,
+                vat_rate=config.vat_rate,
+                contract_start=config.contract_start,
+            )
+            # Default the services-delivered month to when the work actually
+            # happened (latest allocation), not today - invoices are raised in
+            # arrears. Fall back to today only if we can't tell.
+            delivery = storage.get_current_bill_delivery_month(
+                contract_start=config.contract_start,
+            ) or date.today()
+            default_year, default_month = delivery.year, delivery.month
+        else:
+            year, month = period
+            lines = storage.get_bill_lines(year, month)
+            if not lines:
+                lines = storage.get_finalised_bill_summary(
+                    year=year,
+                    month=month,
+                    hours_per_point=config.hours_per_point,
+                    point_rate=config.point_rate,
+                    vat_rate=config.vat_rate,
+                    contract_start=config.contract_start,
+                )
+            # The billed (year, month) is when the bill was raised; the invoice
+            # should show when the work was actually delivered. Prefer the
+            # tickets' latest allocation month, fall back to the stamp.
+            delivery = storage.get_finalised_bill_delivery_month(year, month)
+            if delivery is not None:
+                default_year, default_month = delivery.year, delivery.month
+            else:
+                default_year, default_month = year, month
+
+        if not lines:
+            self.notify("Nothing to invoice", severity="warning")
+            return
+
+        def handle_result(path: str | None) -> None:
+            if path is None:
+                return
+            self.notify(f"Invoice written to {path}")
+
+        self.push_screen(
+            GenerateInvoiceScreen(
+                lines,
+                config.point_rate,
+                config.vat_rate,
+                default_year,
+                default_month,
+            ),
             handle_result,
         )
 

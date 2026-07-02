@@ -10,6 +10,7 @@ from pathlib import Path
 from models import (
     Config,
     Deliverable,
+    InvoiceSettings,
     MonthlyBilling,
     Ticket,
     TicketAllocation,
@@ -114,6 +115,22 @@ def init_db():
             amount_ex_vat TEXT NOT NULL,
             amount_inc_vat TEXT NOT NULL,
             PRIMARY KEY (year, month, line_no)
+        );
+
+        CREATE TABLE IF NOT EXISTS invoice_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            company_name TEXT NOT NULL DEFAULT '',
+            company_address TEXT NOT NULL DEFAULT '',
+            company_postcode TEXT NOT NULL DEFAULT '',
+            company_vat_number TEXT NOT NULL DEFAULT '',
+            company_reg_number TEXT NOT NULL DEFAULT '',
+            bank_sort_code TEXT NOT NULL DEFAULT '',
+            bank_account_number TEXT NOT NULL DEFAULT '',
+            customer_name TEXT NOT NULL DEFAULT '',
+            customer_address TEXT NOT NULL DEFAULT '',
+            customer_postcode TEXT NOT NULL DEFAULT '',
+            contract_po TEXT NOT NULL DEFAULT '',
+            last_invoice_number INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_entries_date ON time_entries(date);
@@ -224,6 +241,35 @@ def init_db():
     else:
         # Migration: bump existing monthly budgets to new contract values
         _update_monthly_point_budgets(conn)
+
+    # Seed the single invoice_settings row with sensible defaults if empty
+    inv_count = conn.execute(
+        "SELECT COUNT(*) as c FROM invoice_settings"
+    ).fetchone()
+    if inv_count["c"] == 0:
+        defaults = InvoiceSettings()
+        conn.execute(
+            "INSERT INTO invoice_settings ("
+            "id, company_name, company_address, company_postcode, "
+            "company_vat_number, company_reg_number, bank_sort_code, "
+            "bank_account_number, customer_name, customer_address, "
+            "customer_postcode, contract_po, last_invoice_number"
+            ") VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                defaults.company_name,
+                defaults.company_address,
+                defaults.company_postcode,
+                defaults.company_vat_number,
+                defaults.company_reg_number,
+                defaults.bank_sort_code,
+                defaults.bank_account_number,
+                defaults.customer_name,
+                defaults.customer_address,
+                defaults.customer_postcode,
+                defaults.contract_po,
+                defaults.last_invoice_number,
+            ),
+        )
 
     conn.commit()
     conn.close()
@@ -513,6 +559,73 @@ def save_config(config: Config):
                   config.contract_end.isoformat() if config.contract_end else ""))
     conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
                  ("annual_max_points", str(config.annual_max_points)))
+    conn.commit()
+    conn.close()
+
+
+def get_invoice_settings() -> InvoiceSettings:
+    """Load the single invoice settings row (defaults if somehow missing)."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM invoice_settings WHERE id = 1"
+    ).fetchone()
+    conn.close()
+
+    if row is None:
+        return InvoiceSettings()
+
+    return InvoiceSettings(
+        company_name=row["company_name"],
+        company_address=row["company_address"],
+        company_postcode=row["company_postcode"],
+        company_vat_number=row["company_vat_number"],
+        company_reg_number=row["company_reg_number"],
+        bank_sort_code=row["bank_sort_code"],
+        bank_account_number=row["bank_account_number"],
+        customer_name=row["customer_name"],
+        customer_address=row["customer_address"],
+        customer_postcode=row["customer_postcode"],
+        contract_po=row["contract_po"],
+        last_invoice_number=row["last_invoice_number"],
+    )
+
+
+def save_invoice_settings(settings: InvoiceSettings) -> None:
+    """Persist the single invoice settings row (upsert on id = 1)."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT OR REPLACE INTO invoice_settings ("
+        "id, company_name, company_address, company_postcode, "
+        "company_vat_number, company_reg_number, bank_sort_code, "
+        "bank_account_number, customer_name, customer_address, "
+        "customer_postcode, contract_po, last_invoice_number"
+        ") VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            settings.company_name,
+            settings.company_address,
+            settings.company_postcode,
+            settings.company_vat_number,
+            settings.company_reg_number,
+            settings.bank_sort_code,
+            settings.bank_account_number,
+            settings.customer_name,
+            settings.customer_address,
+            settings.customer_postcode,
+            settings.contract_po,
+            settings.last_invoice_number,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def bump_invoice_number(n: int) -> None:
+    """Record the most recently used invoice number (so next default is n+1)."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE invoice_settings SET last_invoice_number = ? WHERE id = 1",
+        (n,),
+    )
     conn.commit()
     conn.close()
 
@@ -1137,6 +1250,64 @@ def get_billable_tickets(
         ).fetchall()
     conn.close()
     return [_row_to_ticket(row) for row in rows]
+
+
+def get_current_bill_delivery_month(
+    contract_start: date | None = None,
+) -> date | None:
+    """Month the current (unbilled) bill's work was delivered.
+
+    Returns the first of the month of the latest allocation across all
+    closed-but-unbilled tickets - i.e. when the work actually happened, which
+    is the sensible "services delivered" period for an invoice. Returns None
+    if there's no billable work. Honours contract_start the same way
+    get_billable_tickets does.
+    """
+    conn = get_connection()
+    sql = """
+        SELECT MAX(ta.date) as last_date
+        FROM ticket_allocations ta
+        JOIN tickets t ON t.id = ta.ticket_id
+        WHERE t.archived = 1 AND t.billed = 0
+    """
+    params: list[str] = []
+    if contract_start is not None:
+        sql += " AND ta.date >= ?"
+        params.append(contract_start.isoformat())
+    row = conn.execute(sql, params).fetchone()
+    conn.close()
+
+    if row is None or row["last_date"] is None:
+        return None
+    last = date.fromisoformat(row["last_date"])
+    return last.replace(day=1)
+
+
+def get_finalised_bill_delivery_month(year: int, month: int) -> date | None:
+    """Month the work in a finalised bill was actually delivered.
+
+    Latest allocation date across the tickets stamped to this billed period,
+    as the first of that month. The billed (year, month) is when the bill was
+    *raised* (a ticket bills in the month it's closed), which is often the
+    month after the work was done - but the invoice's "services delivered"
+    line should show when the work happened. Returns None if the period has
+    no allocations.
+    """
+    conn = get_connection()
+    row = conn.execute(
+        """
+        SELECT MAX(ta.date) as last_date
+        FROM ticket_allocations ta
+        JOIN tickets t ON t.id = ta.ticket_id
+        WHERE t.billed = 1 AND t.billed_year = ? AND t.billed_month = ?
+        """,
+        (year, month),
+    ).fetchone()
+    conn.close()
+
+    if row is None or row["last_date"] is None:
+        return None
+    return date.fromisoformat(row["last_date"]).replace(day=1)
 
 
 def get_current_bill_summary(
