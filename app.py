@@ -1134,81 +1134,9 @@ class TimesheetApp(App):
                 month_earnings.update(earnings_text)
             else:
                 month_earnings.add_class("hidden")
-        elif config.contract_start:
-            # Post-contract: points-based summary
-            month_earnings.remove_class("hidden")
-            earnings_text = Text()
-
-            # This month's bill - what was billed (finalised) or will be
-            # billed (current). The single figure that matches the Billing
-            # view; a ticket cashes in the month it closes.
-            bill_pts, bill_finalised = storage.get_month_bill_points(
-                self.current_year, self.current_month,
-                config.hours_per_point, config.point_rate, config.vat_rate,
-                contract_start=config.contract_start,
-            )
-            bill_label = "Billed" if bill_finalised else "To bill"
-
-            # Contract year runs Apr-Mar
-            cy_start = config.contract_start
-            ytd_pts = storage.get_billed_points_total(
-                config.hours_per_point,
-                up_to_year=self.current_year,
-                up_to_month=self.current_month,
-                contract_start=cy_start,
-            )
-
-            # This month's budget + rolled over from previous months
-            month_budget = storage.get_monthly_point_budget(
-                self.current_year, self.current_month,
-            ) or 0
-
-            # Rolled over = cumulative budget up to prev month - billed up to prev month
-            rolled_over = 0
-            prev_m = self.current_month - 1
-            prev_y = self.current_year
-            if prev_m < 1:
-                prev_m = 12
-                prev_y -= 1
-            if (prev_y, prev_m) >= (cy_start.year, cy_start.month):
-                budget_to_prev = storage.get_cumulative_point_budget(
-                    cy_start, prev_y, prev_m,
-                )
-                billed_to_prev = int(storage.get_billed_points_total(
-                    config.hours_per_point,
-                    up_to_year=prev_y, up_to_month=prev_m,
-                    contract_start=cy_start,
-                ))
-                rolled_over = max(0, budget_to_prev - billed_to_prev)
-
-            total_available = month_budget + rolled_over
-
-            # Always show points info
-            budget_str = f"{month_budget}"
-            if rolled_over > 0:
-                budget_str += f"+{rolled_over} rolled over"
-            budget_str += f"={total_available} available"
-
-            earnings_text.append(
-                f"              Contract year: {int(ytd_pts)} pts billed"
-                f"  |  This month: {budget_str}\n",
-            )
-            earnings_text.append("              ")
-            earnings_text.append(
-                f"{bill_label} this month: {bill_pts} pts", style="bold green",
-            )
-
-            # Financial details only when $ toggled
-            if self.show_money and bill_pts > 0:
-                bill_ex = bill_pts * config.point_rate
-                bill_inc = bill_ex * (1 + config.vat_rate)
-                earnings_text.append(
-                    f"\n              {bill_label}: £{float(bill_ex):,.2f}"
-                    f" ex VAT  (£{float(bill_inc):,.2f} inc VAT)",
-                )
-
-            month_earnings.update(earnings_text)
         else:
+            # Post-contract points summary now lives on the Billing view
+            # (press B), amalgamated with the bill's points figures.
             month_earnings.add_class("hidden")
 
     def _get_month_totals(self, year: int, month: int) -> dict:
@@ -3363,6 +3291,46 @@ class TimesheetApp(App):
             table.add_column("Ex VAT", width=12, key="ex_vat")
             table.add_column("Inc VAT", width=12, key="inc_vat")
 
+    def _point_budget_line(self, config, month: date) -> str:
+        """One-line point-budget summary for the given contract month.
+
+        Shows this month's budget plus any allowance rolled over from
+        earlier months, and the resulting available total, e.g.
+        ``This month: 80+38 rolled over=118 available``.
+        """
+        cy_start = config.contract_start
+        if cy_start is None:
+            return ""
+
+        month_budget = storage.get_monthly_point_budget(
+            month.year, month.month,
+        ) or 0
+
+        # Rolled over = cumulative budget up to prev month - billed up to it
+        rolled_over = 0
+        prev_m = month.month - 1
+        prev_y = month.year
+        if prev_m < 1:
+            prev_m = 12
+            prev_y -= 1
+        if (prev_y, prev_m) >= (cy_start.year, cy_start.month):
+            budget_to_prev = storage.get_cumulative_point_budget(
+                cy_start, prev_y, prev_m,
+            )
+            billed_to_prev = int(storage.get_billed_points_total(
+                config.hours_per_point,
+                up_to_year=prev_y, up_to_month=prev_m,
+                contract_start=cy_start,
+            ))
+            rolled_over = max(0, budget_to_prev - billed_to_prev)
+
+        total_available = month_budget + rolled_over
+        budget_str = f"{month_budget}"
+        if rolled_over > 0:
+            budget_str += f"+{rolled_over} rolled over"
+        budget_str += f"={total_available} available"
+        return f"This month: {budget_str}"
+
     def _refresh_billing_display(self):
         """Refresh the billing view (current or a finalised period)."""
         config = storage.get_config()
@@ -3468,6 +3436,18 @@ class TimesheetApp(App):
                 f"{config.annual_max_points} pts "
                 f"({int(annual_remaining)} remaining)",
             ]
+
+            # This month's budget + rolled-over capacity, for the delivery
+            # month of the current bill (falls back to today when there's no
+            # billable work yet). Moved here from the monthly timesheet view.
+            if config.contract_start:
+                budget_line = self._point_budget_line(
+                    config, storage.get_current_bill_delivery_month(
+                        contract_start=config.contract_start,
+                    ) or date.today(),
+                )
+                if budget_line:
+                    summary_parts.append(budget_line)
         else:
             label = "Snapshot" if is_snapshot else "Reconstructed"
             # YTD up to and including the period being viewed: how many
