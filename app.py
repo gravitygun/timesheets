@@ -1719,7 +1719,7 @@ class TimesheetApp(App):
         if carryover:
             divider_row: list[str | Text] = [
                 Text("─" * 6, style="dim"),
-                Text("── carryover (unbilled prior work) ──", style="dim italic"),
+                Text("── carryover ──", style="dim italic"),
             ]
             for day in days_to_show:
                 d = date(self.current_year, self.current_month, day)
@@ -1736,8 +1736,18 @@ class TimesheetApp(App):
             table.add_row(*divider_row, key="__carryover_divider__")
 
             for co_ticket, co_hours in carryover:
+                # Closed carryover tickets are in the current bill even though
+                # none of their hours fall in this month, so they get the same
+                # green ✓ as the active rows. Open ones stay dim - they aren't
+                # billable yet.
+                if co_ticket.archived:
+                    id_cell = Text.assemble(
+                        ("✓ ", "bold green"), (co_ticket.id, "bold green"),
+                    )
+                else:
+                    id_cell = Text("  " + co_ticket.id, style="dim")
                 co_row: list[str | Text] = [
-                    Text(co_ticket.id, style="dim"),
+                    id_cell,
                     Text(co_ticket.description[:18], style="dim"),
                 ]
                 for day in days_to_show:
@@ -1757,7 +1767,13 @@ class TimesheetApp(App):
                 co_row.append(entered_cell)
                 if show_points:
                     co_pts = calculate_points(co_hours, config.hours_per_point)
-                    co_row.append(Text(str(co_pts) if co_pts else "-", style="dim"))
+                    if co_pts and co_ticket.archived:
+                        label = f"{co_pts}✓" if co_ticket.points_entered else str(co_pts)
+                        co_row.append(Text(label, style="bold green"))
+                    else:
+                        co_row.append(
+                            Text(str(co_pts) if co_pts else "-", style="dim"),
+                        )
                 table.add_row(*co_row, key=f"__co_{co_ticket.id}")
 
         # Add summary rows: Worked, Status, and Week Total
