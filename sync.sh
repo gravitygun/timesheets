@@ -145,6 +145,31 @@ cmd_push() {
     fi
   fi
 
+  # Refuse early if the remote has moved on. Fetch and check BEFORE we dump or
+  # commit anything: pushing while behind either needs a force-push (silently
+  # clobbering the other machine's work) or leaves a stale local commit that
+  # the real push rejects — the mess this whole guard exists to prevent. If we
+  # bail here, nothing has been written and the tree is untouched.
+  cd "${DATA_REPO}"
+  if git rev-parse '@{u}' >/dev/null 2>&1; then
+    if git fetch -q 2>/dev/null; then
+      local behind
+      behind=$(git rev-list --count 'HEAD..@{u}' 2>/dev/null || echo 0)
+      if (( behind > 0 )); then
+        red "Remote is ${behind} commit(s) ahead — another machine has pushed since"
+        red "this one last synced. Nothing was dumped or committed; the tree is clean."
+        red ""
+        red "If your local changes are NEW work not on the other machine:"
+        red "    ./sync.sh pull        then re-enter them and push again"
+        red "If they're stale (this laptop was left open / slept for days):"
+        red "    ./sync.sh pull --force    to discard local and take the remote"
+        exit 1
+      fi
+    else
+      yellow "Could not fetch (offline?) — pushing against last-known remote."
+    fi
+  fi
+
   # Dump to a staging path first so we can sanity-check before overwriting.
   local staged
   staged=$(mktemp)
@@ -168,7 +193,7 @@ cmd_push() {
   fi
   mv "${staged}" "${DUMP_FILE}"
 
-  cd "${DATA_REPO}"
+  # (already in DATA_REPO from the behind-check above)
   if git diff --quiet; then
     green "No changes to push."
     return 0
