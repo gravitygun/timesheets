@@ -231,6 +231,7 @@ Endpoints (auto-generated docs at <http://127.0.0.1:8765/docs>):
 | GET    | `/tickets?q=&include_archived=`       | List/search tickets                                      |
 | GET    | `/tickets/{id}`                       | Fetch a ticket (includes `deliverable_id`)               |
 | POST   | `/tickets`                            | Create a ticket (`{id, description, deliverable_id?}`)   |
+| PATCH  | `/tickets/{id}`                       | Update description/deliverable, or rename                |
 | GET    | `/deliverables?active_only=`          | List deliverables (defaults to active only)              |
 | POST   | `/tickets/{id}/archive`               | Close                                                    |
 | POST   | `/tickets/{id}/unarchive`             | Reopen                                                   |
@@ -243,9 +244,10 @@ Endpoints (auto-generated docs at <http://127.0.0.1:8765/docs>):
 Hours are sent and received as decimal-shaped strings (e.g. `"3.50"`) to
 avoid float drift. Allocation `description` may be multi-line. Deliverables
 are exposed read-only and can be set on a ticket at create time so external
-automation (e.g. record-my-time) can keep billing tidy. The API
+automation (e.g. record-my-time) can keep billing tidy. Renaming a ticket
+via `PATCH` moves its allocations with it, so nothing is orphaned. The API
 deliberately does not expose config, work packages, billing, or ticket
-rename/delete - the TUI keeps full control of those.
+deletion - the TUI keeps full control of those.
 
 ## Multi-Machine Setup
 

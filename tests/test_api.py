@@ -169,6 +169,135 @@ class TestTickets:
         r = client.post("/tickets/0000/archive")
         assert r.status_code == 404
 
+    def test_patch_description_only(self, client: TestClient) -> None:
+        client.post(
+            "/tickets",
+            json={"id": "9610", "description": "old", "deliverable_id": "WP5a-D1"},
+        )
+
+        r = client.patch("/tickets/9610", json={"description": "new"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["id"] == "9610"
+        assert body["description"] == "new"
+        # Omitted fields are left alone.
+        assert body["deliverable_id"] == "WP5a-D1"
+        assert body["archived"] is False
+
+    def test_patch_deliverable_only(self, client: TestClient) -> None:
+        client.post("/tickets", json={"id": "9610", "description": "keep me"})
+
+        r = client.patch("/tickets/9610", json={"deliverable_id": "WP5a-D1"})
+        assert r.status_code == 200
+        assert r.json()["deliverable_id"] == "WP5a-D1"
+        assert r.json()["description"] == "keep me"
+
+    def test_patch_unknown_deliverable_rejected(self, client: TestClient) -> None:
+        client.post("/tickets", json={"id": "9610", "description": "keep me"})
+
+        r = client.patch(
+            "/tickets/9610",
+            json={"description": "changed", "deliverable_id": "WP-NOPE"},
+        )
+        assert r.status_code == 422
+        # Rejected patch changes nothing.
+        assert client.get("/tickets/9610").json()["description"] == "keep me"
+
+    def test_patch_rename_cascades_allocations(self, client: TestClient) -> None:
+        client.post("/tickets", json={"id": "9610", "description": "renamed soon"})
+        client.post(
+            "/allocations",
+            json={"ticket_id": "9610", "date": "2026-04-23", "hours": "2.5"},
+        )
+
+        r = client.patch("/tickets/9610", json={"id": "9611"})
+        assert r.status_code == 200
+        assert r.json()["id"] == "9611"
+        assert r.json()["description"] == "renamed soon"
+
+        assert client.get("/tickets/9610").status_code == 404
+        assert client.get("/tickets/9611").status_code == 200
+
+        # The allocation followed the ticket rather than being orphaned.
+        allocs = client.get("/allocations/2026-04-23").json()
+        assert [a["ticket_id"] for a in allocs] == ["9611"]
+        assert Decimal(allocs[0]["hours"]) == Decimal("2.50")
+
+    def test_patch_rename_with_description(self, client: TestClient) -> None:
+        client.post("/tickets", json={"id": "9610", "description": "old"})
+
+        r = client.patch("/tickets/9610", json={"id": "9611", "description": "new"})
+        assert r.status_code == 200
+        assert r.json() == {
+            "id": "9611",
+            "description": "new",
+            "archived": False,
+            "created_at": r.json()["created_at"],
+            "deliverable_id": None,
+        }
+
+    def test_patch_rename_to_taken_id_conflicts(self, client: TestClient) -> None:
+        client.post("/tickets", json={"id": "9610", "description": "mine"})
+        client.post("/tickets", json={"id": "9611", "description": "theirs"})
+        client.post(
+            "/allocations",
+            json={"ticket_id": "9610", "date": "2026-04-23", "hours": "1.0"},
+        )
+
+        r = client.patch("/tickets/9610", json={"id": "9611"})
+        assert r.status_code == 409
+
+        # Neither ticket nor its allocations moved.
+        assert client.get("/tickets/9610").json()["description"] == "mine"
+        assert client.get("/tickets/9611").json()["description"] == "theirs"
+        allocs = client.get("/allocations/2026-04-23").json()
+        assert [a["ticket_id"] for a in allocs] == ["9610"]
+
+    def test_patch_same_id_is_not_a_rename(self, client: TestClient) -> None:
+        client.post("/tickets", json={"id": "9610", "description": "old"})
+
+        r = client.patch("/tickets/9610", json={"id": "9610", "description": "new"})
+        assert r.status_code == 200
+        assert r.json()["id"] == "9610"
+        assert r.json()["description"] == "new"
+
+    def test_patch_empty_body_is_a_noop(self, client: TestClient) -> None:
+        client.post(
+            "/tickets",
+            json={"id": "9610", "description": "untouched", "deliverable_id": "WP5a-D1"},
+        )
+        before = client.get("/tickets/9610").json()
+
+        r = client.patch("/tickets/9610", json={})
+        assert r.status_code == 200
+        assert r.json() == before
+
+    def test_patch_unknown_ticket(self, client: TestClient) -> None:
+        r = client.patch("/tickets/0000", json={"description": "x"})
+        assert r.status_code == 404
+
+    def test_patch_preserves_billed_state(self, client: TestClient) -> None:
+        """A patch must not silently retract a billing claim."""
+        import storage
+
+        client.post("/tickets", json={"id": "9610", "description": "old"})
+        client.post("/tickets/9610/archive")
+        ticket = storage.get_ticket("9610")
+        assert ticket is not None
+        ticket.billed = True
+        ticket.billed_year = 2026
+        ticket.billed_month = 4
+        storage.save_ticket(ticket)
+
+        r = client.patch("/tickets/9610", json={"id": "9611", "description": "new"})
+        assert r.status_code == 200
+        assert r.json()["archived"] is True
+
+        renamed = storage.get_ticket("9611")
+        assert renamed is not None
+        assert renamed.billed is True
+        assert (renamed.billed_year, renamed.billed_month) == (2026, 4)
+
 
 class TestAllocations:
     def test_create_and_list(self, client: TestClient) -> None:

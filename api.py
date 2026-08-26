@@ -3,7 +3,7 @@
 The intent is automation: an external client (e.g. an AI assistant on a remote
 dev machine, reached over an SSH RemoteForward) reads attendance + tickets and
 posts ticket allocations. The TUI remains the source of truth for everything
-else (config, work packages, deliverables, billing, ticket rename/delete).
+else (config, work packages, deliverables, billing, ticket deletion).
 
 All operations delegate to ``storage.py`` so the TUI and the API share a
 single SQLite database (WAL mode is enabled in ``storage.init_db``).
@@ -68,6 +68,18 @@ class TicketOut(BaseModel):
 class TicketIn(BaseModel):
     id: str = Field(min_length=1, max_length=8)
     description: str = Field(min_length=1)
+    deliverable_id: str | None = None
+
+
+class TicketPatch(BaseModel):
+    """Partial ticket update - only the fields supplied are changed.
+
+    A supplied ``id`` that differs from the path's is a rename; allocations
+    follow the ticket so nothing is orphaned.
+    """
+
+    id: str | None = Field(default=None, min_length=1, max_length=8)
+    description: str | None = Field(default=None, min_length=1)
     deliverable_id: str | None = None
 
 
@@ -223,6 +235,48 @@ def create_ticket(payload: Annotated[TicketIn, Body()]) -> TicketOut:
     created = storage.get_ticket(payload.id)
     assert created is not None
     return _ticket_to_out(created)
+
+
+@app.patch("/tickets/{ticket_id}", response_model=TicketOut)
+def patch_ticket(
+    ticket_id: str,
+    payload: Annotated[TicketPatch, Body()],
+) -> TicketOut:
+    """Update a ticket's description, deliverable and/or ID.
+
+    Renaming goes through ``storage.rename_ticket``, which moves the ticket
+    and its allocations together in one transaction.
+    """
+    ticket = storage.get_ticket(ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"ticket {ticket_id!r} not found")
+
+    # Validate before mutating anything, so a rejected patch changes nothing.
+    if payload.deliverable_id is not None:
+        if storage.get_deliverable(payload.deliverable_id) is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"deliverable {payload.deliverable_id!r} not found",
+            )
+
+    if payload.id is not None and payload.id != ticket.id:
+        if not storage.rename_ticket(ticket.id, payload.id):
+            raise HTTPException(
+                status_code=409, detail=f"ticket {payload.id!r} already exists"
+            )
+        ticket.id = payload.id
+
+    if payload.description is not None or payload.deliverable_id is not None:
+        if payload.description is not None:
+            ticket.description = payload.description
+        if payload.deliverable_id is not None:
+            ticket.deliverable_id = payload.deliverable_id
+        # Writes the whole row, so billed/points_entered state must ride along.
+        storage.save_ticket(ticket)
+
+    updated = storage.get_ticket(ticket.id)
+    assert updated is not None
+    return _ticket_to_out(updated)
 
 
 @app.post("/tickets/{ticket_id}/archive", response_model=TicketOut)
