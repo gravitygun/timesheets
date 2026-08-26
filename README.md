@@ -284,11 +284,48 @@ launch and pushes on clean exit:
 If the app crashes or is SIGKILL'd, the trap doesn't fire — run
 `./sync.sh push` manually before switching machines.
 
+### When both machines have changes
+
+If this machine was left with unpushed work while the other machine pushed,
+`./sync.sh push` refuses (it would need a force-push, silently burying the
+other machine's work). To reconcile:
+
+```bash
+./sync.sh pull --keep-local   # merge both sides
+./sync.sh push                # upload the result
+```
+
+`--keep-local` replays every row this machine changed onto the incoming
+dump, matching rows by primary key. Two machines recording *different* days,
+tickets or allocations merge with no interaction — the usual case.
+
+It stops only when both machines changed **the same row** to different
+values, printing the columns that disagree:
+
+```text
+Cannot merge: 1 row was changed on both machines.
+
+  time_entries [2026-07-20]
+      clock_in           here=09:45   other=09:30
+      comment            here=(none)  other=Left early for house viewing
+```
+
+Then nothing is applied at all: the local DB is untouched and the data repo
+is deliberately left behind the remote, so `push` keeps refusing until it's
+sorted. Either fix the row by hand and re-run, or take the other machine's
+version wholesale with `./sync.sh pull --force` (which backs the current DB
+up to `timesheet.db.pre-pull` first).
+
+The merge itself lives in `sync_merge.py` and never writes to the live DB —
+it builds the merged result in a temp file that `sync.sh` swaps in only once
+the merge is clean.
+
 ### Important
 
 - **Never run the app on both machines simultaneously** — SQLite doesn't
-  handle concurrent access from different machines well, and the dump-based
-  sync flow has no merge story.
+  handle concurrent access from different machines well. Divergence that
+  happens *between* sessions is what `pull --keep-local` is for; two live
+  writers at once is still unsupported.
 - Always quit the app/API before pulling. `sync.sh pull` refuses to run
   while it sees them in the process list.
 - `./sync.sh status` shows whether the local DB is dirty and whether the

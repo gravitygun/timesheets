@@ -12,6 +12,7 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 DATA_REPO="${HOME}/.timesheets-data"
 DUMP_FILE="${DATA_REPO}/timesheet.sql"
 DB_PATH="${TIMESHEET_DB:-${HOME}/Library/Application Support/timesheets/timesheet.db}"
@@ -59,9 +60,94 @@ local_dirty() {
   return 0
 }
 
+# Fold this machine's unsynced changes into the incoming dump, rather than
+# having to pick one side. Runs the merge BEFORE fast-forwarding the repo:
+# if it hits a conflict we leave the repo behind the remote, so a later push
+# still refuses rather than clobbering the other machine's work.
+keep_local_pull() {
+  if [[ ! -f "${DUMP_FILE}" ]]; then
+    red "No dump in the data repo yet — nothing to merge against."
+    red "Run: ./sync.sh push    (to seed it from this machine)"
+    exit 1
+  fi
+
+  if ! git rev-parse --verify -q '@{u}' >/dev/null; then
+    yellow "No upstream configured — nothing incoming. Local changes kept."
+    return 0
+  fi
+
+  local behind
+  behind=$(git rev-list --count 'HEAD..@{u}')
+  if (( behind == 0 )); then
+    green "Already up to date. Local changes kept — push when ready."
+    return 0
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    red "python3 not found — needed to merge. Use pull --force to discard local."
+    exit 1
+  fi
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # shellcheck disable=SC2064  # expand tmpdir now: it's out of scope at trap time
+  trap "rm -rf '${tmpdir}'" EXIT
+
+  # base = what we last synced with, target = what's incoming. The live DB is
+  # read directly, and read-only, by the merge.
+  sqlite3 "${tmpdir}/base.db" <"${DUMP_FILE}"
+  git show '@{u}:timesheet.sql' >"${tmpdir}/incoming.sql"
+  sqlite3 "${tmpdir}/merged.db" <"${tmpdir}/incoming.sql"
+
+  yellow "Merging local changes with ${behind} incoming commit(s)…"
+  local rc=0
+  python3 "${SCRIPT_DIR}/sync_merge.py" \
+    --base "${tmpdir}/base.db" \
+    --local "${DB_PATH}" \
+    --target "${tmpdir}/merged.db" || rc=$?
+
+  if (( rc != 0 )); then
+    red ""
+    if (( rc == 3 )); then
+      red "Both machines changed the same row, so this needs your decision."
+    else
+      red "Merge failed."
+    fi
+    red "Nothing has been changed: your local DB is untouched and the data repo"
+    red "is still ${behind} commit(s) behind, so push will keep refusing."
+    red ""
+    red "To take the other machine's version wholesale:"
+    red "    ./sync.sh pull --force    (your DB is backed up to .pre-pull first)"
+    exit 1
+  fi
+
+  # Merge is good — now it's safe to move the repo forward and swap the DB in.
+  git pull --ff-only -q
+  cp "${DB_PATH}" "${DB_PATH}.pre-pull"
+  rm -f "${DB_PATH}" "${DB_PATH}-wal" "${DB_PATH}-shm"
+  mv "${tmpdir}/merged.db" "${DB_PATH}"
+
+  green "Pulled ${behind} new commit(s) and merged your local changes in."
+  yellow "Previous DB backed up to ${DB_PATH}.pre-pull"
+  yellow "Run './sync.sh push' to upload the merged result."
+}
+
 cmd_pull() {
   require_data_repo
-  local force=${1:-}
+  local force=0
+  local keep_local=0
+  for arg in "$@"; do
+    case "${arg}" in
+      --force)      force=1 ;;
+      --keep-local) keep_local=1 ;;
+      *) red "Unknown flag: ${arg}"; exit 1 ;;
+    esac
+  done
+
+  if (( force == 1 && keep_local == 1 )); then
+    red "--force and --keep-local do opposite things; pick one."
+    exit 1
+  fi
 
   if processes_running; then
     red "timesheets app/API still running. Quit it first."
@@ -69,10 +155,18 @@ cmd_pull() {
     exit 1
   fi
 
-  if [[ "${force}" != "--force" ]] && local_dirty; then
+  # Settle this before pulling: once the dump changes underneath us, the live
+  # DB looks dirty whether or not this machine actually changed anything.
+  local was_dirty=0
+  if local_dirty; then
+    was_dirty=1
+  fi
+
+  if (( was_dirty == 1 && force == 0 && keep_local == 0 )); then
     red "Local DB has changes not in the dump."
-    red "Run: ./sync.sh push    (to upload them first)"
-    red "  or ./sync.sh pull --force    (to discard local changes)"
+    red "Run: ./sync.sh push                 (to upload them first)"
+    red "  or ./sync.sh pull --keep-local    (to merge them with the remote's)"
+    red "  or ./sync.sh pull --force         (to discard local changes)"
     exit 1
   fi
 
@@ -80,6 +174,12 @@ cmd_pull() {
   local before_head after_head
   before_head=$(git rev-parse HEAD)
   git fetch -q
+
+  if (( keep_local == 1 && was_dirty == 1 )); then
+    keep_local_pull
+    return
+  fi
+
   git pull --ff-only -q
   after_head=$(git rev-parse HEAD)
 
@@ -160,9 +260,9 @@ cmd_push() {
         red "this one last synced. Nothing was dumped or committed; the tree is clean."
         red ""
         red "If your local changes are NEW work not on the other machine:"
-        red "    ./sync.sh pull        then re-enter them and push again"
+        red "    ./sync.sh pull --keep-local    merges both sides, then push"
         red "If they're stale (this laptop was left open / slept for days):"
-        red "    ./sync.sh pull --force    to discard local and take the remote"
+        red "    ./sync.sh pull --force         discards local, takes the remote"
         exit 1
       fi
     else
@@ -194,12 +294,14 @@ cmd_push() {
   mv "${staged}" "${DUMP_FILE}"
 
   # (already in DATA_REPO from the behind-check above)
-  if git diff --quiet; then
+  # Stage first, then compare against the index: a plain `git diff` ignores
+  # untracked files, so seeding a fresh data repo looked like "nothing to do".
+  git add timesheet.sql
+  if git diff --cached --quiet; then
     green "No changes to push."
     return 0
   fi
 
-  git add timesheet.sql
   git commit -q -m "session $(hostname -s) $(date '+%Y-%m-%d %H:%M')"
   git push -q
   green "Pushed."
@@ -256,6 +358,7 @@ Usage: $(basename "$0") <pull|push|status>
   status     Show local + remote sync state
 
 Flags:
+  pull --keep-local             Merge local DB changes with the incoming dump
   pull --force                  Discard local DB changes when pulling
   push --force-with-running     Push even if app/API processes are running
 EOF

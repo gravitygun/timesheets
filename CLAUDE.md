@@ -108,6 +108,10 @@ not (and should not) sum to the bill.
 - `api.py` - Thin FastAPI HTTP wrapper around `storage.py`. No business
   logic of its own; new behaviour belongs in `storage.py` and the TUI
   picks it up for free. See README for endpoint list.
+- `sync_merge.py` - Three-way row merge used by `sync.sh pull --keep-local`
+  to fold this machine's unsynced changes into an incoming dump. Stdlib
+  only (it runs outside the venv), reads the live DB read-only, and refuses
+  the whole merge if any row was changed on both machines.
 - `run_api.sh` - Launcher for the API (binds `127.0.0.1:8765` by default)
 - `import_data.py` - One-time import from Excel JSON (already run)
 - `tools/extract.py` - Excel extraction utility
