@@ -2378,6 +2378,12 @@ class UpdateAvailableScreen(ModalScreen[bool]):
         margin-bottom: 1;
     }
 
+    #update-uncommitted {
+        width: 100%;
+        color: $warning;
+        margin-bottom: 1;
+    }
+
     #update-buttons {
         width: 100%;
         height: auto;
@@ -2398,11 +2404,14 @@ class UpdateAvailableScreen(ModalScreen[bool]):
         Binding("c", "continue_anyway", "Continue"),
     ]
 
-    def __init__(self, branch: str, ahead: int, behind: int):
+    def __init__(
+        self, branch: str, ahead: int, behind: int, uncommitted: int = 0,
+    ):
         super().__init__()
         self.branch = branch
         self.ahead = ahead
         self.behind = behind
+        self.uncommitted = uncommitted
 
     def compose(self) -> ComposeResult:
         parts = []
@@ -2422,6 +2431,18 @@ class UpdateAvailableScreen(ModalScreen[bool]):
         with Vertical(id="update-dialog"):
             yield Label("Updates available", id="update-title")
             yield Label(message, id="update-message")
+            if self.uncommitted:
+                # There are upstream commits to pull *and* local edits in the
+                # way - worth calling out, since that pull is the one that
+                # will refuse to run or leave a mess.
+                files = (
+                    f"{self.uncommitted} uncommitted "
+                    f"file{'s' if self.uncommitted != 1 else ''}"
+                )
+                yield Label(
+                    f"You also have {files} - commit or stash before pulling.",
+                    id="update-uncommitted",
+                )
             with Horizontal(id="update-buttons"):
                 yield Button("Quit (Q)", variant="primary", id="quit")
                 yield Button("Continue (C)", variant="default", id="continue")

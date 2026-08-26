@@ -64,22 +64,32 @@ class GitStatus(NamedTuple):
       (branch, ahead, behind set).
     - "unavailable": the probe couldn't determine sync state; reason is
       a short human-readable explanation for the toast.
+
+    uncommitted counts working-tree entries (modified, staged and untracked,
+    but not gitignored). It is probed before the upstream comparison, so it
+    is meaningful even when state is "unavailable" - being offline is
+    exactly when unsaved local work is easiest to lose track of.
     """
     state: str
     branch: str | None = None
     ahead: int = 0
     behind: int = 0
     reason: str | None = None
+    uncommitted: int = 0
 
 
-def _check_git_status() -> GitStatus:
+def _check_git_status(repo_root: Path | None = None) -> GitStatus:
     """Probe git for this app's branch vs its upstream.
 
     Each failure stage maps to a specific human-readable reason
     rather than a silent None, so the UI can show a toast explaining
     why the check couldn't run (offline, detached HEAD, etc.).
+
+    repo_root defaults to the directory this file lives in; it is a
+    parameter so tests can point the probe at a scratch repo.
     """
-    repo_root = Path(__file__).resolve().parent
+    if repo_root is None:
+        repo_root = Path(__file__).resolve().parent
 
     def git(*args: str, timeout: float = 3.0) -> str | None:
         try:
@@ -111,14 +121,22 @@ def _check_git_status() -> GitStatus:
     if git("rev-parse", "--is-inside-work-tree") != "true":
         return GitStatus("unavailable", reason="not running from a git repo")
 
+    # Local, no network: do this before the fetch so the count survives
+    # every "unavailable" exit below. Empty output means a clean tree;
+    # None means the probe itself failed, which we report as clean rather
+    # than inventing a warning.
+    porcelain = git("status", "--porcelain")
+    dirty = len(porcelain.splitlines()) if porcelain else 0
+
     branch = git("symbolic-ref", "--short", "HEAD")
     if not branch:
-        return GitStatus("unavailable", reason="detached HEAD")
+        return GitStatus("unavailable", reason="detached HEAD", uncommitted=dirty)
 
     upstream = git("rev-parse", "--abbrev-ref", "@{u}")
     if not upstream:
         return GitStatus(
             "unavailable", branch=branch, reason="no upstream set",
+            uncommitted=dirty,
         )
 
     # Refresh remote refs. Longer timeout because fetch can be slow on
@@ -127,33 +145,45 @@ def _check_git_status() -> GitStatus:
     if git("fetch", "--quiet", timeout=5.0) is None:
         return GitStatus(
             "unavailable", branch=branch, reason="offline (fetch failed)",
+            uncommitted=dirty,
         )
 
     counts = git("rev-list", "--left-right", "--count", "HEAD...@{u}")
     if not counts:
         return GitStatus(
             "unavailable", branch=branch,
-            reason="couldn't compare to upstream",
+            reason="couldn't compare to upstream", uncommitted=dirty,
         )
     parts = counts.split()
     if len(parts) != 2:
         return GitStatus(
             "unavailable", branch=branch,
-            reason="unexpected rev-list output",
+            reason="unexpected rev-list output", uncommitted=dirty,
         )
     try:
         ahead, behind = int(parts[0]), int(parts[1])
     except ValueError:
         return GitStatus(
             "unavailable", branch=branch,
-            reason="unexpected rev-list output",
+            reason="unexpected rev-list output", uncommitted=dirty,
         )
 
     if ahead == 0 and behind == 0:
-        return GitStatus("in_sync", branch=branch)
+        return GitStatus("in_sync", branch=branch, uncommitted=dirty)
     return GitStatus(
         "out_of_sync", branch=branch, ahead=ahead, behind=behind,
+        uncommitted=dirty,
     )
+
+
+def _describe_uncommitted(count: int) -> str:
+    """Phrase a dirty-working-tree count for a toast or dialog."""
+    return f"{count} uncommitted file{'s' if count != 1 else ''}"
+
+
+def _describe_unpushed(count: int) -> str:
+    """Phrase an ahead-of-upstream commit count."""
+    return f"{count} unpushed commit{'s' if count != 1 else ''}"
 
 
 class TimesheetDataTable(DataTable):
@@ -596,19 +626,26 @@ class TimesheetApp(App):
     def _check_for_updates_bg(self) -> None:
         """Run the git probe off the UI thread; schedule UI updates by state."""
         status = _check_git_status()
+        dirty = (
+            _describe_uncommitted(status.uncommitted)
+            if status.uncommitted
+            else None
+        )
         if status.state == "out_of_sync":
             assert status.branch is not None
-            # Ahead-only means there's nothing to pull, just commits we
-            # haven't pushed yet - that's a soft warning, not a "stop"
-            # modal. The modal stays for behind/diverged because those
-            # really do have upstream changes the user should see first.
+            # Ahead-only means there's nothing to pull, just work that only
+            # exists on this machine - a soft warning, not a "stop" modal.
+            # The modal stays for behind/diverged because those really do
+            # have upstream changes the user should see first.
             if status.behind == 0 and status.ahead > 0:
-                plural = "s" if status.ahead != 1 else ""
+                local = [_describe_unpushed(status.ahead)]
+                if dirty:
+                    local.append(dirty)
                 self.call_from_thread(
                     self.notify,
                     (
-                        f"Local commits not pushed: {status.ahead} "
-                        f"commit{plural} ahead of remote {status.branch}"
+                        f"Not synced to remote {status.branch}: "
+                        f"{' and '.join(local)}"
                     ),
                     severity="warning",
                 )
@@ -617,19 +654,33 @@ class TimesheetApp(App):
                     self.push_screen,
                     UpdateAvailableScreen(
                         status.branch, status.ahead, status.behind,
+                        status.uncommitted,
                     ),
                     self._on_update_dialog_dismissed,
                 )
         elif status.state == "in_sync":
-            self.call_from_thread(
-                self.notify,
-                f"App is up to date with remote branch {status.branch}",
-            )
+            if dirty:
+                # Up to date with the remote, but this machine still holds
+                # work nobody else can see.
+                self.call_from_thread(
+                    self.notify,
+                    (
+                        f"Up to date with remote branch {status.branch}, "
+                        f"but you have {dirty}"
+                    ),
+                    severity="warning",
+                )
+            else:
+                self.call_from_thread(
+                    self.notify,
+                    f"App is up to date with remote branch {status.branch}",
+                )
         else:  # "unavailable"
+            message = f"Can't check if updates are available: {status.reason}"
+            if dirty:
+                message += f" (you have {dirty})"
             self.call_from_thread(
-                self.notify,
-                f"Can't check if updates are available: {status.reason}",
-                severity="warning",
+                self.notify, message, severity="warning",
             )
 
     def _on_update_dialog_dismissed(self, continue_anyway: bool | None) -> None:

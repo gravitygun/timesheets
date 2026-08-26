@@ -13,6 +13,7 @@ from screens import (
     EditTicketScreen,
     TicketManagementScreen,
     TicketSelectScreen,
+    UpdateAvailableScreen,
 )
 
 
@@ -175,3 +176,21 @@ class TestEditAllocationScreen:
         binding_keys = [getattr(b, "key", None) for b in screen.BINDINGS]
 
         assert "escape" in binding_keys
+
+
+class TestUpdateAvailableScreen:
+    """Tests for the out-of-sync startup dialog."""
+
+    def test_init_stores_counts(self):
+        screen = UpdateAvailableScreen("main", 1, 2, 3)
+
+        assert screen.branch == "main"
+        assert screen.ahead == 1
+        assert screen.behind == 2
+        assert screen.uncommitted == 3
+
+    def test_uncommitted_defaults_to_none_pending(self):
+        """Older three-argument construction still works."""
+        screen = UpdateAvailableScreen("main", 0, 2)
+
+        assert screen.uncommitted == 0

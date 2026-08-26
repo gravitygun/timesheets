@@ -327,3 +327,234 @@ class TestHasAllocationMismatch:
                 result = app._has_allocation_mismatch(date(2026, 1, 27), entries_dict)
 
             assert result is True
+
+
+class TestGitStatusProbe:
+    """Tests for _check_git_status against real scratch repositories."""
+
+    @staticmethod
+    def _git(repo, *args: str) -> None:
+        import subprocess
+
+        subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+        )
+
+    @classmethod
+    def _make_repo(cls, tmp_path):
+        """Build a clone with an upstream, both holding one commit."""
+        origin = tmp_path / "origin.git"
+        work = tmp_path / "work"
+        cls._git(tmp_path, "init", "--bare", "--initial-branch=main", str(origin))
+        cls._git(tmp_path, "clone", str(origin), str(work))
+        cls._git(work, "config", "user.email", "test@example.com")
+        cls._git(work, "config", "user.name", "Test")
+        (work / "README.md").write_text("hello\n")
+        cls._git(work, "add", "README.md")
+        cls._git(work, "commit", "-m", "initial")
+        cls._git(work, "push", "-u", "origin", "main")
+        return work
+
+    def test_clean_repo_is_in_sync_with_nothing_uncommitted(self, tmp_path):
+        from app import _check_git_status
+
+        work = self._make_repo(tmp_path)
+        status = _check_git_status(work)
+
+        assert status.state == "in_sync"
+        assert status.branch == "main"
+        assert status.uncommitted == 0
+
+    def test_modified_file_counts_as_uncommitted(self, tmp_path):
+        from app import _check_git_status
+
+        work = self._make_repo(tmp_path)
+        (work / "README.md").write_text("changed\n")
+
+        status = _check_git_status(work)
+        assert status.state == "in_sync"
+        assert status.uncommitted == 1
+
+    def test_staged_and_untracked_both_count(self, tmp_path):
+        from app import _check_git_status
+
+        work = self._make_repo(tmp_path)
+        (work / "staged.txt").write_text("x\n")
+        self._git(work, "add", "staged.txt")
+        (work / "untracked.txt").write_text("y\n")
+
+        status = _check_git_status(work)
+        assert status.uncommitted == 2
+
+    def test_ignored_files_do_not_count(self, tmp_path):
+        from app import _check_git_status
+
+        work = self._make_repo(tmp_path)
+        (work / ".gitignore").write_text("*.log\n")
+        self._git(work, "add", ".gitignore")
+        self._git(work, "commit", "-m", "ignore logs")
+        self._git(work, "push")
+        (work / "noise.log").write_text("chatter\n")
+
+        status = _check_git_status(work)
+        assert status.uncommitted == 0
+
+    def test_unpushed_commit_is_out_of_sync_and_ahead(self, tmp_path):
+        from app import _check_git_status
+
+        work = self._make_repo(tmp_path)
+        (work / "README.md").write_text("more\n")
+        self._git(work, "commit", "-am", "local work")
+
+        status = _check_git_status(work)
+        assert status.state == "out_of_sync"
+        assert (status.ahead, status.behind) == (1, 0)
+        assert status.uncommitted == 0
+
+    def test_unpushed_and_uncommitted_reported_together(self, tmp_path):
+        from app import _check_git_status
+
+        work = self._make_repo(tmp_path)
+        (work / "README.md").write_text("more\n")
+        self._git(work, "commit", "-am", "local work")
+        (work / "scratch.txt").write_text("wip\n")
+
+        status = _check_git_status(work)
+        assert status.state == "out_of_sync"
+        assert status.ahead == 1
+        assert status.uncommitted == 1
+
+    def test_uncommitted_survives_missing_upstream(self, tmp_path):
+        """The count must still arrive when the sync check can't run."""
+        from app import _check_git_status
+
+        work = self._make_repo(tmp_path)
+        self._git(work, "checkout", "-b", "no-upstream")
+        (work / "scratch.txt").write_text("wip\n")
+
+        status = _check_git_status(work)
+        assert status.state == "unavailable"
+        assert status.reason == "no upstream set"
+        assert status.uncommitted == 1
+
+    def test_not_a_repo_is_unavailable(self, tmp_path):
+        from app import _check_git_status
+
+        status = _check_git_status(tmp_path)
+        assert status.state == "unavailable"
+        assert status.reason == "not running from a git repo"
+
+
+class TestUpdateWarnings:
+    """Tests for the toast/dialog wording driven by the probe."""
+
+    @staticmethod
+    def _run(status):
+        """Run the background check with a canned status; capture UI calls."""
+        from app import TimesheetApp
+
+        calls = []
+
+        with patch.object(TimesheetApp, 'run'):
+            app = TimesheetApp()
+        with (
+            patch('app._check_git_status', return_value=status),
+            patch.object(
+                TimesheetApp, 'call_from_thread',
+                lambda self, fn, *a, **kw: calls.append((fn.__name__, a, kw)),
+            ),
+        ):
+            app._check_for_updates_bg()
+
+        assert len(calls) == 1, f"expected one UI call, got {calls}"
+        return calls[0]
+
+    def test_in_sync_and_clean_is_a_plain_notice(self):
+        from app import GitStatus
+
+        name, args, kwargs = self._run(GitStatus("in_sync", branch="main"))
+        assert name == "notify"
+        assert args[0] == "App is up to date with remote branch main"
+        assert "severity" not in kwargs
+
+    def test_in_sync_but_dirty_warns(self):
+        from app import GitStatus
+
+        name, args, kwargs = self._run(
+            GitStatus("in_sync", branch="main", uncommitted=3)
+        )
+        assert name == "notify"
+        assert args[0] == (
+            "Up to date with remote branch main, but you have "
+            "3 uncommitted files"
+        )
+        assert kwargs["severity"] == "warning"
+
+    def test_single_uncommitted_file_is_singular(self):
+        from app import GitStatus
+
+        _, args, _ = self._run(
+            GitStatus("in_sync", branch="main", uncommitted=1)
+        )
+        assert "1 uncommitted file," not in args[0]
+        assert "you have 1 uncommitted file" in args[0]
+
+    def test_ahead_only_warns_about_unpushed_commits(self):
+        from app import GitStatus
+
+        name, args, kwargs = self._run(
+            GitStatus("out_of_sync", branch="main", ahead=2)
+        )
+        assert name == "notify"
+        assert args[0] == "Not synced to remote main: 2 unpushed commits"
+        assert kwargs["severity"] == "warning"
+
+    def test_ahead_and_dirty_warns_about_both(self):
+        from app import GitStatus
+
+        _, args, kwargs = self._run(
+            GitStatus("out_of_sync", branch="main", ahead=1, uncommitted=2)
+        )
+        assert args[0] == (
+            "Not synced to remote main: 1 unpushed commit and "
+            "2 uncommitted files"
+        )
+        assert kwargs["severity"] == "warning"
+
+    def test_behind_still_opens_the_dialog_carrying_the_count(self):
+        from app import GitStatus
+
+        name, args, _ = self._run(
+            GitStatus(
+                "out_of_sync", branch="main", ahead=0, behind=4, uncommitted=2
+            )
+        )
+        assert name == "push_screen"
+        screen = args[0]
+        assert screen.behind == 4
+        assert screen.uncommitted == 2
+
+    def test_unavailable_mentions_uncommitted_work(self):
+        from app import GitStatus
+
+        _, args, kwargs = self._run(
+            GitStatus(
+                "unavailable", branch="main",
+                reason="offline (fetch failed)", uncommitted=2,
+            )
+        )
+        assert args[0] == (
+            "Can't check if updates are available: offline (fetch failed) "
+            "(you have 2 uncommitted files)"
+        )
+        assert kwargs["severity"] == "warning"
+
+    def test_unavailable_and_clean_is_unchanged(self):
+        from app import GitStatus
+
+        _, args, _ = self._run(
+            GitStatus("unavailable", reason="git is not installed")
+        )
+        assert args[0] == (
+            "Can't check if updates are available: git is not installed"
+        )
