@@ -1,9 +1,10 @@
 """HTTP API exposing a narrow slice of timesheet operations.
 
 The intent is automation: an external client (e.g. an AI assistant on a remote
-dev machine, reached over an SSH RemoteForward) reads attendance + tickets and
-posts ticket allocations. The TUI remains the source of truth for everything
-else (config, work packages, deliverables, billing, ticket deletion).
+dev machine, reached over an SSH RemoteForward) records attendance, reads
+tickets and posts ticket allocations. The TUI remains the source of truth
+for everything else (config, work packages, deliverables, billing, ticket
+deletion).
 
 All operations delegate to ``storage.py`` so the TUI and the API share a
 single SQLite database (WAL mode is enabled in ``storage.init_db``).
@@ -12,7 +13,7 @@ single SQLite database (WAL mode is enabled in ``storage.init_db``).
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Annotated, AsyncIterator
 
@@ -20,7 +21,7 @@ from fastapi import Body, FastAPI, HTTPException, Path, Query
 from pydantic import BaseModel, Field, PlainSerializer
 
 import storage
-from models import Deliverable, Ticket, TicketAllocation
+from models import Deliverable, Ticket, TicketAllocation, TimeEntry
 
 
 # --- Serialisation helpers -------------------------------------------------
@@ -30,6 +31,11 @@ HoursStr = Annotated[
     Decimal,
     PlainSerializer(lambda v: format(v.quantize(Decimal("0.01")), "f"), return_type=str),
 ]
+
+# Adjustment types this endpoint will accept. Note the TUI also recognises
+# "T" (Training) - see utils.ADJUST_TYPES and screens.py - so an existing
+# Training day cannot currently be rewritten through the API.
+ADJUST_TYPES = ("L", "P", "S")
 
 
 # --- Response models -------------------------------------------------------
@@ -55,6 +61,21 @@ class EntryOut(BaseModel):
     allocation_gap_hours: HoursStr = Field(
         description="worked_hours minus total_allocated_hours; positive means under-allocated",
     )
+
+
+class EntryIn(BaseModel):
+    """Full-replacement body for PUT /entries/{date}.
+
+    This is a PUT, not a PATCH: omitted optional fields are cleared on an
+    existing entry rather than left alone.
+    """
+
+    clock_in: str = Field(description='24-hour "HH:MM", e.g. "09:15"')
+    clock_out: str = Field(description='24-hour "HH:MM", e.g. "17:15"')
+    lunch_minutes: int = Field(ge=0)
+    adjustment_minutes: int | None = Field(default=None, ge=0)
+    adjust_type: str | None = None
+    comment: str | None = None
 
 
 class TicketOut(BaseModel):
@@ -137,6 +158,17 @@ def _allocation_to_out(a: TicketAllocation) -> AllocationOut:
     )
 
 
+def _parse_clock(value: str, field: str) -> time:
+    """Parse an "HH:MM" clock string, or raise a 422 naming the field."""
+    try:
+        return datetime.strptime(value.strip(), "%H:%M").time()
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f'{field} must be a 24-hour "HH:MM" time, got {value!r}',
+        ) from None
+
+
 def _entry_to_out(d: date) -> EntryOut:
     entry = storage.get_entry(d)
     if entry is None:
@@ -189,6 +221,92 @@ def health() -> HealthOut:
 
 @app.get("/entries/{entry_date}", response_model=EntryOut)
 def get_entry(entry_date: date) -> EntryOut:
+    return _entry_to_out(entry_date)
+
+
+@app.put("/entries/{entry_date}", response_model=EntryOut)
+def put_entry(
+    entry_date: date,
+    payload: Annotated[EntryIn, Body()],
+) -> EntryOut:
+    """Create or replace the attendance record for a date.
+
+    The billed check comes first: once a day's work has been entered on the
+    client's system the record is closed, and no amount of well-formed input
+    should quietly rewrite it.
+    """
+    # A day counts as billed only if it *has* allocations and every one of
+    # them has been entered client-side. Guarding on `all()` alone would
+    # reject every date with no allocations at all, i.e. most of them.
+    allocations = storage.get_allocations_for_date(entry_date)
+    if allocations and all(a.entered_on_client for a in allocations):
+        raise HTTPException(
+            status_code=409,
+            detail=f"entry for {entry_date.isoformat()} is already billed",
+        )
+
+    clock_in = _parse_clock(payload.clock_in, "clock_in")
+    clock_out = _parse_clock(payload.clock_out, "clock_out")
+    if clock_out <= clock_in:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"clock_out ({payload.clock_out}) must be after "
+                f"clock_in ({payload.clock_in})"
+            ),
+        )
+
+    # Lunch is subtracted from the clocked span, so an oversized value would
+    # produce negative worked_hours and quietly corrupt the billing figures.
+    span_minutes = (
+        clock_out.hour * 60 + clock_out.minute
+    ) - (clock_in.hour * 60 + clock_in.minute)
+    if payload.lunch_minutes > span_minutes:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"lunch_minutes ({payload.lunch_minutes}) cannot exceed the "
+                f"{span_minutes} minutes between clock_in and clock_out"
+            ),
+        )
+
+    adjust_type = payload.adjust_type
+    if adjust_type is not None:
+        adjust_type = adjust_type.strip().upper()
+        if adjust_type not in ADJUST_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"adjust_type must be one of {', '.join(ADJUST_TYPES)}, "
+                    f"got {payload.adjust_type!r}"
+                ),
+            )
+
+    # CLAUDE.md: adjustment hours require a type. The TUI enforces this, and
+    # max_hours only subtracts "P" adjustments, so an untyped one is data the
+    # rest of the app cannot reason about.
+    if payload.adjustment_minutes and adjust_type is None:
+        raise HTTPException(
+            status_code=422,
+            detail="adjustment_minutes requires an adjust_type",
+        )
+
+    storage.save_entry(
+        TimeEntry(
+            date=entry_date,
+            day_of_week=entry_date.strftime("%a"),
+            clock_in=clock_in,
+            lunch_duration=timedelta(minutes=payload.lunch_minutes)
+            if payload.lunch_minutes
+            else None,
+            clock_out=clock_out,
+            adjustment=timedelta(minutes=payload.adjustment_minutes)
+            if payload.adjustment_minutes
+            else None,
+            adjust_type=adjust_type,
+            comment=payload.comment,
+        )
+    )
     return _entry_to_out(entry_date)
 
 

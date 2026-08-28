@@ -228,6 +228,7 @@ Endpoints (auto-generated docs at <http://127.0.0.1:8765/docs>):
 | ------ | ------------------------------------- | -------------------------------------------------------- |
 | GET    | `/health`                             | Liveness + reports the active database path              |
 | GET    | `/entries/{date}`                     | Attendance + worked/allocated/gap hours for a day        |
+| PUT    | `/entries/{date}`                     | Create or replace a day's attendance                     |
 | GET    | `/tickets?q=&include_archived=`       | List/search tickets                                      |
 | GET    | `/tickets/{id}`                       | Fetch a ticket (includes `deliverable_id`)               |
 | POST   | `/tickets`                            | Create a ticket (`{id, description, deliverable_id?}`)   |
