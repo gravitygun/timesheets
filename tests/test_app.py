@@ -558,3 +558,141 @@ class TestUpdateWarnings:
         assert args[0] == (
             "Can't check if updates are available: git is not installed"
         )
+
+
+class TestEntryCacheFreshness:
+    """The entries cache must not go stale when another process writes.
+
+    The HTTP API writes to the same SQLite file while the TUI is open, so a
+    snapshot loaded once per month change silently shows old data.
+    """
+
+    @staticmethod
+    def _app(year: int, month: int):
+        from app import TimesheetApp
+        from utils import get_weeks_in_month
+
+        with patch.object(TimesheetApp, 'run'):
+            app = TimesheetApp()
+        app.current_year, app.current_month = year, month
+        app.weeks = get_weeks_in_month(year, month)
+        app._load_month_data()
+        return app
+
+    @staticmethod
+    def _save(d, clock_in, clock_out):
+        import storage
+        from datetime import time
+        from models import TimeEntry
+
+        storage.save_entry(
+            TimeEntry(
+                date=d,
+                day_of_week=d.strftime("%a"),
+                clock_in=time(*clock_in),
+                lunch_duration=timedelta(minutes=30),
+                clock_out=time(*clock_out),
+            )
+        )
+
+    def test_cycling_weeks_picks_up_an_external_write(self, clean_db):
+        """The reported bug, end to end.
+
+        Moving between weeks *within* a month took a branch that only
+        re-rendered, so a day the API had rewritten kept its old times until
+        the month changed.
+        """
+        from datetime import time
+        from unittest.mock import MagicMock
+
+        from app import TimesheetApp
+
+        day = date(2026, 1, 14)
+        self._save(day, (9, 0), (17, 0))
+        app = self._app(2026, 1)
+        app.view_mode = "week"
+        app.current_week_idx = 0
+        assert app._get_or_create_entry(day).clock_in == time(9, 0)
+
+        # Another actor (the API on a remote box) rewrites the day.
+        self._save(day, (8, 0), (16, 0))
+
+        # Cycle away and back, staying inside the month the whole time.
+        with (
+            patch.object(
+                TimesheetApp, 'query_one',
+                return_value=MagicMock(cursor_row=0),
+            ),
+            patch.object(TimesheetApp, '_refresh_week_display'),
+            patch.object(TimesheetApp, '_update_window_title'),
+        ):
+            app.action_next_week()
+            app.action_prev_week()
+
+        assert app.current_week_idx == 0, "should be back on the starting week"
+        assert app._get_or_create_entry(day).clock_in == time(8, 0)
+
+    def test_reload_picks_up_an_external_delete(self, clean_db):
+        import storage
+
+        day = date(2026, 1, 14)
+        self._save(day, (9, 0), (17, 0))
+        app = self._app(2026, 1)
+
+        conn = storage.get_connection()
+        conn.execute("DELETE FROM time_entries WHERE date = ?", (day.isoformat(),))
+        conn.commit()
+        conn.close()
+
+        app._load_month_data()
+        assert app._get_or_create_entry(day).clock_in is None
+
+    def test_refresh_display_rereads_before_rendering(self):
+        """Week navigation only calls _refresh_display, so the reload lives there."""
+        from app import TimesheetApp
+
+        with patch.object(TimesheetApp, 'run'):
+            app = TimesheetApp()
+        app.view_mode = "week"
+
+        with (
+            patch.object(TimesheetApp, '_load_month_data') as load,
+            patch.object(TimesheetApp, '_refresh_week_display'),
+            patch.object(TimesheetApp, '_update_window_title'),
+        ):
+            app._refresh_display()
+
+        load.assert_called_once()
+
+    def test_boundary_days_from_adjacent_months_are_loaded(self, clean_db):
+        """January's first week shows late-December days; they need real data."""
+        from datetime import time
+
+        boundary = date(2025, 12, 30)
+        self._save(boundary, (9, 0), (17, 0))
+
+        app = self._app(2026, 1)
+        # The week grid really does span this day.
+        assert app.weeks[0][0] <= boundary <= app.weeks[0][1]
+        assert app._get_or_create_entry(boundary).clock_in == time(9, 0)
+
+    def test_trailing_boundary_days_are_loaded(self, clean_db):
+        """And the last week can run into the following month."""
+        from datetime import time
+
+        app = self._app(2026, 1)
+        last_week_end = app.weeks[-1][1]
+        assert last_week_end.month != 1
+
+        self._save(last_week_end, (10, 0), (15, 0))
+        app._load_month_data()
+        assert app._get_or_create_entry(last_week_end).clock_in == time(10, 0)
+
+    def test_cache_stays_bounded_to_the_visible_range(self, clean_db):
+        """Widening the range must not pull in the whole table."""
+        far_off = date(2026, 6, 1)
+        self._save(far_off, (9, 0), (17, 0))
+
+        app = self._app(2026, 1)
+        assert far_off not in app.entries
+        assert min(app.entries, default=date(2026, 1, 1)) >= app.weeks[0][0]

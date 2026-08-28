@@ -789,8 +789,21 @@ class TimesheetApp(App):
         self._setup_billing_table()
 
     def _load_month_data(self):
-        """Load all entries for current month into memory."""
-        entries = storage.get_month_entries(self.current_year, self.current_month)
+        """Load the entries the current view can display.
+
+        The range spans ``self.weeks`` rather than the calendar month: a
+        boundary week shows days from the adjacent month (e.g. "(Dec 27)" in
+        January's first week), and those days have real data that must be
+        read too, or they render blank.
+        """
+        if self.weeks:
+            start = min(w[0] for w in self.weeks)
+            end = max(w[1] for w in self.weeks)
+            entries = storage.get_entries_range(start, end)
+        else:
+            entries = storage.get_month_entries(
+                self.current_year, self.current_month,
+            )
         self.entries = {e.date: e for e in entries}
 
     def _get_or_create_entry(self, d: date) -> TimeEntry:
@@ -821,6 +834,12 @@ class TimesheetApp(App):
         return count
 
     def _refresh_display(self):
+        # Re-read before rendering. The HTTP API - and whoever is driving it -
+        # writes to the same SQLite file while the TUI is open, so a cached
+        # snapshot goes stale with no local edit to invalidate it. Every local
+        # edit path calls storage.save_entry() before touching self.entries,
+        # so re-reading can never discard an unsaved change.
+        self._load_month_data()
         if self.view_mode == "week":
             self._refresh_week_display()
         elif self.view_mode == "month":
