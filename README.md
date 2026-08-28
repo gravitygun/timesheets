@@ -239,8 +239,17 @@ Endpoints (auto-generated docs at <http://127.0.0.1:8765/docs>):
 | GET    | `/allocations/{date}`                 | Allocations for a day                                    |
 | GET    | `/allocations/month/{year}/{month}`   | Allocations for a calendar month                         |
 | POST   | `/allocations`                        | Upsert `{ticket_id, date, hours, description?}`          |
+| PATCH  | `/allocations/{ticket_id}/{date}`     | Update hours, description or entered flag                |
+| POST   | `/allocations/mark-entered`           | Bulk-set entered flag over a date range                  |
 | DELETE | `/allocations/{ticket_id}/{date}`     | Remove a single allocation                               |
 <!-- markdownlint-enable MD013 -->
+
+Marking work as entered on the client's system is what `entered_on_client`
+tracks; `POST /allocations/mark-entered` sets it across a date range in one
+call and reports only the allocations that actually changed. Changing an
+allocation's `hours` clears the flag, since the figure on the client no
+longer matches; changing only its description leaves it set. Passing
+`entered_on_client` explicitly in the same PATCH overrides that.
 
 Hours are sent and received as decimal-shaped strings (e.g. `"3.50"`) to
 avoid float drift. Allocation `description` may be multi-line. Deliverables

@@ -986,6 +986,97 @@ def delete_allocation(ticket_id: str, d: date) -> None:
     conn.close()
 
 
+def update_allocation(
+    ticket_id: str,
+    d: date,
+    hours: Decimal | None = None,
+    description: str | None = None,
+    entered_on_client: bool | None = None,
+) -> bool:
+    """Update selected columns of one allocation. Returns False if absent.
+
+    Only the fields passed are written, in a single targeted UPDATE. This is
+    deliberately not routed through ``save_allocation``: that is an
+    INSERT OR REPLACE of the whole row, so a partial edit would have to
+    read-modify-write and could clobber a concurrent change made in the TUI.
+
+    Changing ``hours`` clears ``entered_on_client``, because the figure typed
+    into the client's system no longer matches what is recorded here. Passing
+    ``entered_on_client`` explicitly in the same call wins, for the case where
+    the day has been re-entered with the corrected figure.
+    """
+    assignments: list[str] = []
+    params: list[object] = []
+
+    if hours is not None:
+        assignments.append("hours = ?")
+        params.append(str(hours))
+    if description is not None:
+        assignments.append("description = ?")
+        params.append(description)
+    if entered_on_client is not None:
+        assignments.append("entered_on_client = ?")
+        params.append(int(entered_on_client))
+    elif hours is not None:
+        assignments.append("entered_on_client = 0")
+
+    conn = get_connection()
+    exists = conn.execute(
+        "SELECT 1 FROM ticket_allocations WHERE ticket_id = ? AND date = ?",
+        (ticket_id, d.isoformat()),
+    ).fetchone()
+    if exists is None:
+        conn.close()
+        return False
+
+    if assignments:
+        params.extend([ticket_id, d.isoformat()])
+        # The interpolated fragments are literals built above, never caller
+        # input; every value is bound.
+        conn.execute(
+            f"UPDATE ticket_allocations SET {', '.join(assignments)} "
+            "WHERE ticket_id = ? AND date = ?",
+            params,
+        )
+        conn.commit()
+    conn.close()
+    return True
+
+
+def mark_allocations_entered(
+    start: date, end: date, entered: bool = True,
+) -> list[tuple[str, date]]:
+    """Flip entered_on_client across a date range (inclusive).
+
+    Returns the (ticket_id, date) pairs that actually changed, so a caller can
+    report what it did; rows already holding the target value are left alone
+    and not reported. Both dates are inclusive.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT ticket_id, date FROM ticket_allocations
+        WHERE date >= ? AND date <= ?
+          AND COALESCE(entered_on_client, 0) != ?
+        ORDER BY date, ticket_id
+        """,
+        (start.isoformat(), end.isoformat(), int(entered)),
+    ).fetchall()
+
+    if rows:
+        conn.execute(
+            """
+            UPDATE ticket_allocations SET entered_on_client = ?
+            WHERE date >= ? AND date <= ?
+              AND COALESCE(entered_on_client, 0) != ?
+            """,
+            (int(entered), start.isoformat(), end.isoformat(), int(entered)),
+        )
+        conn.commit()
+    conn.close()
+    return [(r["ticket_id"], date.fromisoformat(r["date"])) for r in rows]
+
+
 def get_total_allocated_hours(d: date) -> Decimal:
     """Get the total hours allocated for a specific date."""
     conn = get_connection()

@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Annotated, AsyncIterator
 
 from fastapi import Body, FastAPI, HTTPException, Path, Query
-from pydantic import BaseModel, Field, PlainSerializer
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
 
 import storage
 from models import Deliverable, Ticket, TicketAllocation, TimeEntry
@@ -124,6 +124,41 @@ class AllocationIn(BaseModel):
     date: date
     hours: HoursStr
     description: str | None = None
+
+
+class AllocationPatch(BaseModel):
+    """Partial allocation update; only the fields supplied are changed.
+
+    Changing ``hours`` clears ``entered_on_client`` unless this same body sets
+    it - the client's system is holding the old figure. Changing only the
+    description leaves the flag alone, since the billed figure is unaffected.
+    """
+
+    hours: HoursStr | None = None
+    description: str | None = None
+    entered_on_client: bool | None = None
+
+
+class MarkEnteredIn(BaseModel):
+    """Date range (inclusive both ends) to flip entered_on_client across."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    # "from" is a keyword, so the field is named from_ and aliased on the wire.
+    from_: date = Field(alias="from")
+    to: date
+    entered_on_client: bool = True
+
+
+class AllocationRef(BaseModel):
+    ticket_id: str
+    date: date
+
+
+class MarkEnteredOut(BaseModel):
+    changed: int = Field(description="how many allocations actually flipped")
+    entered_on_client: bool
+    allocations: list[AllocationRef]
 
 
 # --- Conversions -----------------------------------------------------------
@@ -460,6 +495,65 @@ def upsert_allocation(payload: Annotated[AllocationIn, Body()]) -> AllocationOut
         if a.ticket_id == payload.ticket_id:
             return _allocation_to_out(a)
     raise HTTPException(status_code=500, detail="allocation save round-trip failed")
+
+
+@app.post("/allocations/mark-entered", response_model=MarkEnteredOut)
+def mark_allocations_entered(
+    payload: Annotated[MarkEnteredIn, Body()],
+) -> MarkEnteredOut:
+    """Flip entered_on_client across a date range in one call.
+
+    Reports only the allocations that actually changed, so re-running over the
+    same range reports nothing rather than re-claiming work.
+    """
+    if payload.from_ > payload.to:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"'from' ({payload.from_.isoformat()}) must not be after "
+                f"'to' ({payload.to.isoformat()})"
+            ),
+        )
+    changed = storage.mark_allocations_entered(
+        payload.from_, payload.to, payload.entered_on_client,
+    )
+    return MarkEnteredOut(
+        changed=len(changed),
+        entered_on_client=payload.entered_on_client,
+        allocations=[
+            AllocationRef(ticket_id=tid, date=d) for tid, d in changed
+        ],
+    )
+
+
+@app.patch(
+    "/allocations/{ticket_id}/{alloc_date}", response_model=AllocationOut,
+)
+def patch_allocation(
+    ticket_id: str,
+    alloc_date: date,
+    payload: Annotated[AllocationPatch, Body()],
+) -> AllocationOut:
+    """Update one allocation's hours, description and/or entered flag."""
+    found = storage.update_allocation(
+        ticket_id,
+        alloc_date,
+        hours=payload.hours,
+        description=payload.description,
+        entered_on_client=payload.entered_on_client,
+    )
+    if not found:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no allocation for ticket {ticket_id!r} on "
+                f"{alloc_date.isoformat()}"
+            ),
+        )
+    for a in storage.get_allocations_for_date(alloc_date):
+        if a.ticket_id == ticket_id:
+            return _allocation_to_out(a)
+    raise HTTPException(status_code=500, detail="allocation read-back failed")
 
 
 @app.delete("/allocations/{ticket_id}/{alloc_date}", status_code=204)

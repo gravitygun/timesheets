@@ -590,6 +590,270 @@ class TestAllocations:
         r = client.delete("/allocations/9610/2026-04-23")
         assert r.status_code == 404
 
+
+class TestPatchAllocation:
+    """Tests for PATCH /allocations/{ticket_id}/{date}."""
+
+    @staticmethod
+    def _seed(client: TestClient, hours: str = "2.75", desc: str = "note") -> None:
+        client.post("/tickets", json={"id": "9610", "description": "work"})
+        client.post(
+            "/allocations",
+            json={
+                "ticket_id": "9610",
+                "date": "2026-08-25",
+                "hours": hours,
+                "description": desc,
+            },
+        )
+
+    def test_marks_entered_on_client(self, client: TestClient) -> None:
+        self._seed(client)
+        assert client.get("/allocations/2026-08-25").json()[0][
+            "entered_on_client"
+        ] is False
+
+        r = client.patch(
+            "/allocations/9610/2026-08-25", json={"entered_on_client": True}
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["entered_on_client"] is True
+        # Untouched fields survive.
+        assert body["hours"] == "2.75"
+        assert body["description"] == "note"
+
+    def test_unmarks_entered_on_client(self, client: TestClient) -> None:
+        self._seed(client)
+        client.patch("/allocations/9610/2026-08-25", json={"entered_on_client": True})
+
+        r = client.patch(
+            "/allocations/9610/2026-08-25", json={"entered_on_client": False}
+        )
+        assert r.status_code == 200
+        assert r.json()["entered_on_client"] is False
+
+    def test_updates_hours_and_description(self, client: TestClient) -> None:
+        self._seed(client)
+
+        r = client.patch(
+            "/allocations/9610/2026-08-25",
+            json={"hours": "3.50", "description": "reworked"},
+        )
+        assert r.status_code == 200
+        assert r.json()["hours"] == "3.50"
+        assert r.json()["description"] == "reworked"
+
+    def test_changing_hours_clears_entered(self, client: TestClient) -> None:
+        """The client's system is holding the old figure, so the day is stale."""
+        self._seed(client)
+        client.patch("/allocations/9610/2026-08-25", json={"entered_on_client": True})
+
+        r = client.patch("/allocations/9610/2026-08-25", json={"hours": "3.50"})
+        assert r.status_code == 200
+        assert r.json()["hours"] == "3.50"
+        assert r.json()["entered_on_client"] is False
+
+    def test_description_only_change_keeps_entered(self, client: TestClient) -> None:
+        """A reworded note does not change what was billed."""
+        self._seed(client)
+        client.patch("/allocations/9610/2026-08-25", json={"entered_on_client": True})
+
+        r = client.patch(
+            "/allocations/9610/2026-08-25", json={"description": "clearer wording"}
+        )
+        assert r.status_code == 200
+        assert r.json()["description"] == "clearer wording"
+        assert r.json()["entered_on_client"] is True
+
+    def test_explicit_entered_wins_over_the_hours_rule(
+        self, client: TestClient
+    ) -> None:
+        """Re-entering the corrected figure is a single call."""
+        self._seed(client)
+
+        r = client.patch(
+            "/allocations/9610/2026-08-25",
+            json={"hours": "3.50", "entered_on_client": True},
+        )
+        assert r.status_code == 200
+        assert r.json()["hours"] == "3.50"
+        assert r.json()["entered_on_client"] is True
+
+    def test_empty_body_is_a_noop(self, client: TestClient) -> None:
+        self._seed(client)
+        client.patch("/allocations/9610/2026-08-25", json={"entered_on_client": True})
+        before = client.get("/allocations/2026-08-25").json()[0]
+
+        r = client.patch("/allocations/9610/2026-08-25", json={})
+        assert r.status_code == 200
+        assert r.json() == before
+
+    def test_unknown_allocation(self, client: TestClient) -> None:
+        r = client.patch(
+            "/allocations/9610/2026-08-25", json={"entered_on_client": True}
+        )
+        assert r.status_code == 404
+
+    def test_wrong_date_for_existing_ticket(self, client: TestClient) -> None:
+        self._seed(client)
+        r = client.patch(
+            "/allocations/9610/2026-08-26", json={"entered_on_client": True}
+        )
+        assert r.status_code == 404
+
+    def test_does_not_touch_a_sibling_allocation(self, client: TestClient) -> None:
+        """The targeted UPDATE must hit exactly one row."""
+        self._seed(client)
+        client.post("/tickets", json={"id": "9611", "description": "other"})
+        client.post(
+            "/allocations",
+            json={"ticket_id": "9611", "date": "2026-08-25", "hours": "1.00"},
+        )
+
+        client.patch(
+            "/allocations/9610/2026-08-25",
+            json={"hours": "5.00", "entered_on_client": True},
+        )
+
+        others = [
+            a
+            for a in client.get("/allocations/2026-08-25").json()
+            if a["ticket_id"] == "9611"
+        ]
+        assert others[0]["hours"] == "1.00"
+        assert others[0]["entered_on_client"] is False
+
+
+class TestMarkEntered:
+    """Tests for POST /allocations/mark-entered."""
+
+    @staticmethod
+    def _seed(client: TestClient, days: list[str], ticket: str = "9610") -> None:
+        client.post("/tickets", json={"id": ticket, "description": "work"})
+        for d in days:
+            client.post(
+                "/allocations",
+                json={"ticket_id": ticket, "date": d, "hours": "1.00"},
+            )
+
+    def test_marks_a_range_in_one_call(self, client: TestClient) -> None:
+        self._seed(client, ["2026-08-25", "2026-08-26", "2026-08-27"])
+        self._seed(client, ["2026-08-25", "2026-08-26"], ticket="9611")
+
+        r = client.post(
+            "/allocations/mark-entered",
+            json={"from": "2026-08-25", "to": "2026-08-28",
+                  "entered_on_client": True},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["changed"] == 5
+        assert body["entered_on_client"] is True
+        assert {(a["ticket_id"], a["date"]) for a in body["allocations"]} == {
+            ("9610", "2026-08-25"), ("9610", "2026-08-26"),
+            ("9610", "2026-08-27"), ("9611", "2026-08-25"),
+            ("9611", "2026-08-26"),
+        }
+
+        for d in ("2026-08-25", "2026-08-26", "2026-08-27"):
+            assert all(
+                a["entered_on_client"] for a in client.get(f"/allocations/{d}").json()
+            )
+
+    def test_range_bounds_are_inclusive(self, client: TestClient) -> None:
+        self._seed(client, ["2026-08-24", "2026-08-25", "2026-08-28", "2026-08-29"])
+
+        r = client.post(
+            "/allocations/mark-entered",
+            json={"from": "2026-08-25", "to": "2026-08-28"},
+        )
+        assert {a["date"] for a in r.json()["allocations"]} == {
+            "2026-08-25", "2026-08-28",
+        }
+        # Days either side are untouched.
+        assert client.get("/allocations/2026-08-24").json()[0][
+            "entered_on_client"
+        ] is False
+        assert client.get("/allocations/2026-08-29").json()[0][
+            "entered_on_client"
+        ] is False
+
+    def test_defaults_to_marking_entered(self, client: TestClient) -> None:
+        self._seed(client, ["2026-08-25"])
+
+        r = client.post(
+            "/allocations/mark-entered",
+            json={"from": "2026-08-25", "to": "2026-08-25"},
+        )
+        assert r.json()["entered_on_client"] is True
+        assert r.json()["changed"] == 1
+
+    def test_can_pull_a_range_back(self, client: TestClient) -> None:
+        self._seed(client, ["2026-08-25", "2026-08-26"])
+        client.post(
+            "/allocations/mark-entered",
+            json={"from": "2026-08-25", "to": "2026-08-26"},
+        )
+
+        r = client.post(
+            "/allocations/mark-entered",
+            json={"from": "2026-08-25", "to": "2026-08-26",
+                  "entered_on_client": False},
+        )
+        assert r.json()["changed"] == 2
+        assert r.json()["entered_on_client"] is False
+        assert not any(
+            a["entered_on_client"]
+            for a in client.get("/allocations/2026-08-25").json()
+        )
+
+    def test_reports_only_what_actually_changed(self, client: TestClient) -> None:
+        """Re-running must not re-claim work already marked."""
+        self._seed(client, ["2026-08-25", "2026-08-26"])
+        body = {"from": "2026-08-25", "to": "2026-08-26"}
+
+        assert client.post("/allocations/mark-entered", json=body).json()[
+            "changed"
+        ] == 2
+        second = client.post("/allocations/mark-entered", json=body).json()
+        assert second["changed"] == 0
+        assert second["allocations"] == []
+
+    def test_empty_range_is_not_an_error(self, client: TestClient) -> None:
+        r = client.post(
+            "/allocations/mark-entered",
+            json={"from": "2026-08-25", "to": "2026-08-28"},
+        )
+        assert r.status_code == 200
+        assert r.json() == {
+            "changed": 0, "entered_on_client": True, "allocations": [],
+        }
+
+    def test_hours_and_description_are_untouched(self, client: TestClient) -> None:
+        client.post("/tickets", json={"id": "9610", "description": "work"})
+        client.post(
+            "/allocations",
+            json={"ticket_id": "9610", "date": "2026-08-25", "hours": "2.75",
+                  "description": "keep me"},
+        )
+
+        client.post(
+            "/allocations/mark-entered",
+            json={"from": "2026-08-25", "to": "2026-08-25"},
+        )
+        got = client.get("/allocations/2026-08-25").json()[0]
+        assert got["hours"] == "2.75"
+        assert got["description"] == "keep me"
+
+    def test_reversed_range_rejected(self, client: TestClient) -> None:
+        r = client.post(
+            "/allocations/mark-entered",
+            json={"from": "2026-08-28", "to": "2026-08-25"},
+        )
+        assert r.status_code == 422
+        assert "must not be after" in r.json()["detail"]
+
     def test_month_listing(self, client: TestClient) -> None:
         _seed_ticket()
         for day in (1, 15, 30):
