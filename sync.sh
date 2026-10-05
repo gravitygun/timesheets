@@ -39,10 +39,13 @@ dump_db_to() {
     red "DB not found at ${DB_PATH}"
     exit 1
   fi
-  # Strip sqlite_sequence inserts: SQLite auto-populates that table from the
-  # data INSERTs during restore, so the explicit rows are redundant. Without
-  # this the dump grows by one duplicate row each pull-restore cycle.
-  sqlite3 "${DB_PATH}" .dump | grep -v '^INSERT INTO sqlite_sequence ' >"${target}"
+  # --nosys omits system tables (sqlite_sequence): SQLite auto-populates it
+  # from the data INSERTs during restore, so the explicit rows are redundant,
+  # and including them made the dump grow by one duplicate row each
+  # pull-restore cycle. It also keeps the output stable across sqlite3
+  # versions — 3.54 started wrapping sqlite_sequence in writable_schema
+  # PRAGMAs, which made an unchanged DB look dirty against an older dump.
+  sqlite3 "${DB_PATH}" '.dump --nosys' >"${target}"
 }
 
 local_dirty() {
