@@ -296,6 +296,22 @@ launch and pushes on clean exit:
 If the app crashes or is SIGKILL'd, the trap doesn't fire — run
 `./sync.sh push` manually before switching machines.
 
+### Auto-sync while the app is open
+
+So that leaving the app open at the end of the day doesn't strand the
+day's work, the TUI pushes DB changes itself every 15 minutes. Each tick
+only `stat`s the DB and its `-wal` file — constant cost however large the
+DB grows. Only if they've changed since the last successful sync does it
+run `./sync.sh push --if-changed --force-with-running` in the background.
+That dumps and compares locally first and touches the network only when
+there's something to send.
+
+All of `sync.sh`'s guards still apply. If the other machine has pushed in
+the meantime, auto-sync refuses and shows a warning (once per distinct
+failure). It keeps retrying each tick until you reconcile as below.
+Auto-sync only runs against the default DB path, never a test or scratch
+DB that `TIMESHEET_DB` points elsewhere.
+
 ### When both machines have changes
 
 If this machine was left with unpushed work while the other machine pushed,
@@ -337,7 +353,9 @@ the merge is clean.
 - **Never run the app on both machines simultaneously** — SQLite doesn't
   handle concurrent access from different machines well. Divergence that
   happens *between* sessions is what `pull --keep-local` is for; two live
-  writers at once is still unsupported.
+  writers at once is still unsupported. Auto-sync makes forgetting to quit
+  cheaper, not safe: quit before starting on the other machine, so it pulls
+  this one's work.
 - Always quit the app/API before pulling. `sync.sh pull` refuses to run
   while it sees them in the process list.
 - `./sync.sh status` shows whether the local DB is dirty and whether the

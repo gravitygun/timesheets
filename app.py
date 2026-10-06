@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 from datetime import date, timedelta
@@ -184,6 +185,69 @@ def _describe_uncommitted(count: int) -> str:
 def _describe_unpushed(count: int) -> str:
     """Phrase an ahead-of-upstream commit count."""
     return f"{count} unpushed commit{'s' if count != 1 else ''}"
+
+
+AUTO_SYNC_INTERVAL = 15 * 60  # seconds
+SYNC_SCRIPT = Path(__file__).resolve().parent / "sync.sh"
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _db_fingerprint(db_path: Path) -> tuple[tuple[int, int] | None, ...]:
+    """Cheap O(1) marker that changes whenever the DB is written to.
+
+    Every commit lands in the -wal file and every checkpoint rewrites the
+    main file, so (mtime, size) of the pair moves on any write, from this
+    process or the API. False positives (a checkpoint with no new data) are
+    harmless: sync.sh's own dump-and-compare then finds nothing to push.
+    The -shm file is deliberately excluded because readers touch it too.
+    """
+    def stat(path: Path) -> tuple[int, int] | None:
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    return (stat(db_path), stat(db_path.with_name(db_path.name + "-wal")))
+
+
+class SyncResult(NamedTuple):
+    """Outcome of one auto-sync push; message is set only on failure."""
+
+    ok: bool
+    pushed: bool = False
+    message: str = ""
+
+
+def _run_sync_push(script: Path = SYNC_SCRIPT, timeout: float = 120.0) -> SyncResult:
+    """Run `sync.sh push` on behalf of the still-open app.
+
+    --force-with-running because the app is, by definition, running (a dump
+    is a single read transaction, so WAL gives it a consistent snapshot).
+    --if-changed keeps a no-op tick offline. The script's own guards still
+    apply: it refuses if another machine has pushed since our last sync.
+    """
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        result = subprocess.run(
+            [str(script), "push", "--if-changed", "--force-with-running"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return SyncResult(False, message="sync.sh timed out")
+    except OSError as exc:
+        return SyncResult(False, message=f"couldn't run sync.sh: {exc}")
+    if result.returncode != 0:
+        lines = _ANSI_ESCAPE.sub("", result.stderr).splitlines()
+        first = next((line.strip() for line in lines if line.strip()), None)
+        return SyncResult(
+            False, message=first or f"sync.sh exited with {result.returncode}",
+        )
+    return SyncResult(True, pushed="Pushed." in _ANSI_ESCAPE.sub("", result.stdout))
 
 
 class TimesheetDataTable(DataTable):
@@ -506,6 +570,13 @@ class TimesheetApp(App):
         self.day_view_date: date | None = None
         self.day_allocations: list[TicketAllocation] = []
 
+        # Periodic auto-sync of the DB to the data repo. The fingerprint is
+        # what the DB looked like at the last successful sync; None forces
+        # the first tick to check, catching changes from before startup.
+        self._auto_sync_fingerprint: tuple[tuple[int, int] | None, ...] | None = None
+        self._auto_sync_running = False
+        self._auto_sync_last_error: str | None = None
+
         # Privacy mode: hide earnings by default
         self.show_money = False
 
@@ -622,6 +693,51 @@ class TimesheetApp(App):
         threading.Thread(
             target=self._check_for_updates_bg, daemon=True,
         ).start()
+        # Only ever auto-push the real DB, never a test or scratch one that
+        # TIMESHEET_DB happens to point at.
+        if storage.DB_PATH.resolve() == storage.DEFAULT_DB_PATH.resolve():
+            self.set_interval(AUTO_SYNC_INTERVAL, self._auto_sync_tick)
+
+    def _auto_sync_tick(self) -> None:
+        """Push DB changes to the data repo if anything has been written."""
+        if self._auto_sync_running:
+            return
+        fingerprint = _db_fingerprint(storage.DB_PATH)
+        if fingerprint == self._auto_sync_fingerprint:
+            return
+        self._auto_sync_running = True
+        threading.Thread(
+            target=self._auto_sync_bg, args=(fingerprint,), daemon=True,
+        ).start()
+
+    def _auto_sync_bg(self, fingerprint: tuple[tuple[int, int] | None, ...]) -> None:
+        """Run sync.sh off the UI thread (git fetch/push can be slow)."""
+        result = _run_sync_push()
+        self.call_from_thread(self._on_auto_sync_done, fingerprint, result)
+
+    def _on_auto_sync_done(
+        self,
+        fingerprint: tuple[tuple[int, int] | None, ...],
+        result: SyncResult,
+    ) -> None:
+        self._auto_sync_running = False
+        if result.ok:
+            # Fingerprint was taken before the push, so a write that landed
+            # mid-push still differs from it and gets picked up next tick.
+            self._auto_sync_fingerprint = fingerprint
+            self._auto_sync_last_error = None
+            if result.pushed:
+                self.notify("Timesheet data synced to remote")
+            return
+        # Keep retrying every tick, but only nag once per distinct failure.
+        if result.message != self._auto_sync_last_error:
+            self._auto_sync_last_error = result.message
+            self.notify(
+                f"Auto-sync failed: {result.message}\n"
+                "Run ./sync.sh status to see why.",
+                severity="warning",
+                timeout=30,
+            )
 
     def _check_for_updates_bg(self) -> None:
         """Run the git probe off the UI thread; schedule UI updates by state."""

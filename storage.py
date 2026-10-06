@@ -19,11 +19,16 @@ from models import (
 )
 
 
+DEFAULT_DB_PATH = (
+    Path.home() / "Library" / "Application Support" / "timesheets" / "timesheet.db"
+)
+
+
 def _get_db_path() -> Path:
     """Get database path from environment variable or default location."""
     if env_path := os.environ.get("TIMESHEET_DB"):
         return Path(env_path)
-    return Path.home() / "Library" / "Application Support" / "timesheets" / "timesheet.db"
+    return DEFAULT_DB_PATH
 
 
 DB_PATH = _get_db_path()

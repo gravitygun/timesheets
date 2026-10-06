@@ -230,13 +230,29 @@ cmd_push() {
   require_data_repo
   local force_running=0
   local allow_shrink=0
+  local if_changed=0
   for arg in "$@"; do
     case "${arg}" in
       --force-with-running) force_running=1 ;;
       --allow-shrink)       allow_shrink=1 ;;
+      --if-changed)         if_changed=1 ;;
       *) red "Unknown flag: ${arg}"; exit 1 ;;
     esac
   done
+
+  # Cheap, offline pre-check for the app's periodic auto-sync: skip the
+  # network fetch entirely unless there's something to send — either the
+  # live DB differs from the dump, or an earlier push committed but never
+  # reached the remote (e.g. it was offline at the time).
+  if (( if_changed == 1 )) && ! local_dirty; then
+    local unpushed
+    unpushed=$(git -C "${DATA_REPO}" rev-list --count '@{u}..HEAD' 2>/dev/null \
+      || echo 0)
+    if (( unpushed == 0 )); then
+      green "No changes to push."
+      return 0
+    fi
+  fi
 
   if processes_running; then
     if [[ "${force_running}" == "1" ]]; then
@@ -370,6 +386,7 @@ Flags:
   pull --keep-local             Merge local DB changes with the incoming dump
   pull --force                  Discard local DB changes when pulling
   push --force-with-running     Push even if app/API processes are running
+  push --if-changed             Do nothing (and skip the fetch) if nothing to send
 EOF
       exit 1
       ;;

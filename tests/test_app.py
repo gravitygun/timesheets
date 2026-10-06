@@ -696,3 +696,120 @@ class TestEntryCacheFreshness:
         app = self._app(2026, 1)
         assert far_off not in app.entries
         assert min(app.entries, default=date(2026, 1, 1)) >= app.weeks[0][0]
+
+
+class TestAutoSync:
+    """Tests for the periodic push of DB changes to the data repo."""
+
+    @staticmethod
+    def _script(tmp_path, body):
+        script = tmp_path / "sync.sh"
+        script.write_text(f"#!/bin/bash\n{body}\n")
+        script.chmod(0o755)
+        return script
+
+    @staticmethod
+    def _app():
+        from app import TimesheetApp
+
+        with patch.object(TimesheetApp, 'run'):
+            return TimesheetApp()
+
+    def test_fingerprint_moves_on_write_and_ignores_shm(self, tmp_path):
+        import os
+
+        from app import _db_fingerprint
+
+        db = tmp_path / "t.db"
+        db.write_bytes(b"x")
+        before = _db_fingerprint(db)
+        assert before == _db_fingerprint(db)
+
+        (tmp_path / "t.db-shm").write_bytes(b"read")
+        assert _db_fingerprint(db) == before
+
+        wal = tmp_path / "t.db-wal"
+        wal.write_bytes(b"commit")
+        os.utime(wal, ns=(1, 1))
+        assert _db_fingerprint(db) != before
+
+    def test_push_reports_pushed(self, tmp_path):
+        from app import _run_sync_push
+
+        script = self._script(tmp_path, r'printf "\033[32mPushed.\033[0m\n"')
+        assert _run_sync_push(script) == (True, True, "")
+
+    def test_nothing_to_push_is_quiet_success(self, tmp_path):
+        from app import _run_sync_push
+
+        script = self._script(tmp_path, 'echo "No changes to push."')
+        assert _run_sync_push(script) == (True, False, "")
+
+    def test_passes_if_changed_and_force_flags(self, tmp_path):
+        from app import _run_sync_push
+
+        script = self._script(
+            tmp_path,
+            '[[ "$*" == "push --if-changed --force-with-running" ]] '
+            '&& echo Pushed.',
+        )
+        assert _run_sync_push(script).pushed
+
+    def test_failure_surfaces_first_stderr_line(self, tmp_path):
+        from app import _run_sync_push
+
+        script = self._script(
+            tmp_path,
+            r'printf "\033[31mRemote is 2 commit(s) ahead\033[0m\nmore\n" >&2;'
+            ' exit 1',
+        )
+        result = _run_sync_push(script)
+        assert not result.ok
+        assert result.message == "Remote is 2 commit(s) ahead"
+
+    def test_missing_script_is_a_failure_not_a_crash(self, tmp_path):
+        from app import _run_sync_push
+
+        result = _run_sync_push(tmp_path / "nope.sh")
+        assert not result.ok
+        assert "couldn't run sync.sh" in result.message
+
+    def test_unchanged_db_skips_the_script(self):
+        from app import _db_fingerprint
+
+        import storage
+
+        app = self._app()
+        app._auto_sync_fingerprint = _db_fingerprint(storage.DB_PATH)
+        with patch('app.threading.Thread') as thread:
+            app._auto_sync_tick()
+        thread.assert_not_called()
+
+    def test_changed_db_runs_the_script_once(self):
+        app = self._app()
+        with patch('app.threading.Thread') as thread:
+            app._auto_sync_tick()
+            app._auto_sync_tick()  # still running: must not stack up
+        thread.assert_called_once()
+
+    def test_success_records_fingerprint(self):
+        from app import SyncResult
+
+        app = self._app()
+        app._auto_sync_running = True
+        with patch.object(type(app), 'notify') as notify:
+            app._on_auto_sync_done(((1, 1), None), SyncResult(True, pushed=True))
+        assert app._auto_sync_fingerprint == ((1, 1), None)
+        assert not app._auto_sync_running
+        notify.assert_called_once_with("Timesheet data synced to remote")
+
+    def test_failure_retries_but_only_warns_once(self):
+        from app import SyncResult
+
+        app = self._app()
+        failed = SyncResult(False, message="Remote is 1 commit(s) ahead")
+        with patch.object(type(app), 'notify') as notify:
+            app._on_auto_sync_done(((1, 1), None), failed)
+            app._on_auto_sync_done(((2, 2), None), failed)
+        assert app._auto_sync_fingerprint is None  # so the next tick retries
+        assert notify.call_count == 1
