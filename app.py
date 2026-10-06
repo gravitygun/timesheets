@@ -4,25 +4,34 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import threading
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import NamedTuple
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, Vertical
 from textual.widgets import Static, Footer, DataTable
 from textual.coordinate import Coordinate
 from rich.text import Text
 
 import storage
+from autosync import (
+    SYNC_INTERVAL,
+    Fingerprint,
+    SyncResult,
+    SyncState,
+    db_fingerprint,
+    format_when,
+    run_sync_push,
+)
 from models import Ticket, TicketAllocation, TimeEntry
 from utils import calculate_points, get_weeks_in_month
 from screens import (
+    AutoQuitScreen,
     ConfirmScreen,
     DeliverableBillTicketsScreen,
     DeliverableManagementScreen,
@@ -34,11 +43,12 @@ from screens import (
     GenerateInvoiceScreen,
     InvoiceSettingsScreen,
     MoveAllocationScreen,
+    SyncStatusScreen,
     TicketManagementScreen,
     TicketSelectScreen,
     UpdateAvailableScreen,
 )
-from widgets import CombinedHeader, DayDescription, DayHeader, DaySummary, DayTimeEntry, WeeklySummary
+from widgets import CombinedHeader, DayDescription, DayHeader, DaySummary, DayTimeEntry, SyncStatusBar, WeeklySummary
 
 
 def _emit_terminal_title(title: str) -> None:
@@ -187,68 +197,22 @@ def _describe_unpushed(count: int) -> str:
     return f"{count} unpushed commit{'s' if count != 1 else ''}"
 
 
-AUTO_SYNC_INTERVAL = 15 * 60  # seconds
-SYNC_SCRIPT = Path(__file__).resolve().parent / "sync.sh"
-_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+AUTO_QUIT_AFTER = timedelta(hours=8)
+AUTO_QUIT_EXTENSION = timedelta(hours=1)
+HEARTBEAT_SECONDS = 60
 
 
-def _db_fingerprint(db_path: Path) -> tuple[tuple[int, int] | None, ...]:
-    """Cheap O(1) marker that changes whenever the DB is written to.
-
-    Every commit lands in the -wal file and every checkpoint rewrites the
-    main file, so (mtime, size) of the pair moves on any write, from this
-    process or the API. False positives (a checkpoint with no new data) are
-    harmless: sync.sh's own dump-and-compare then finds nothing to push.
-    The -shm file is deliberately excluded because readers touch it too.
-    """
-    def stat(path: Path) -> tuple[int, int] | None:
-        try:
-            st = path.stat()
-        except OSError:
-            return None
-        return (st.st_mtime_ns, st.st_size)
-
-    return (stat(db_path), stat(db_path.with_name(db_path.name + "-wal")))
-
-
-class SyncResult(NamedTuple):
-    """Outcome of one auto-sync push; message is set only on failure."""
-
-    ok: bool
-    pushed: bool = False
-    message: str = ""
-
-
-def _run_sync_push(script: Path = SYNC_SCRIPT, timeout: float = 120.0) -> SyncResult:
-    """Run `sync.sh push` on behalf of the still-open app.
-
-    --force-with-running because the app is, by definition, running (a dump
-    is a single read transaction, so WAL gives it a consistent snapshot).
-    --if-changed keeps a no-op tick offline. The script's own guards still
-    apply: it refuses if another machine has pushed since our last sync.
-    """
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    try:
-        result = subprocess.run(
-            [str(script), "push", "--if-changed", "--force-with-running"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        return SyncResult(False, message="sync.sh timed out")
-    except OSError as exc:
-        return SyncResult(False, message=f"couldn't run sync.sh: {exc}")
-    if result.returncode != 0:
-        lines = _ANSI_ESCAPE.sub("", result.stderr).splitlines()
-        first = next((line.strip() for line in lines if line.strip()), None)
-        return SyncResult(
-            False, message=first or f"sync.sh exited with {result.returncode}",
-        )
-    return SyncResult(True, pushed="Pushed." in _ANSI_ESCAPE.sub("", result.stdout))
-
+def _describe_duration(delta: timedelta) -> str:
+    """Phrase a session length like "8 hours" or "1 hour 5 minutes"."""
+    minutes = int(delta.total_seconds() // 60)
+    hours, minutes = divmod(minutes, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes or not hours:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    return " ".join(parts)
 
 class TimesheetDataTable(DataTable):
     """Custom DataTable that delegates left/right keys to the app for navigation in week/month/day views."""
@@ -352,6 +316,16 @@ class TimesheetApp(App):
     CSS = """
     Screen {
         background: $surface;
+    }
+
+    #bottom-bar {
+        dock: bottom;
+        height: 2;
+    }
+
+    #sync-status {
+        height: 1;
+        padding: 0 1;
     }
 
     #combined-header {
@@ -540,6 +514,7 @@ class TimesheetApp(App):
         Binding("f", "finalise_billing", "Finalise"),
         Binding("i", "generate_invoice", "Invoice"),
         Binding("I", "invoice_settings", "Inv Setup"),
+        Binding("s", "show_sync_status", "Sync"),
     ]
 
     def __init__(self):
@@ -570,12 +545,16 @@ class TimesheetApp(App):
         self.day_view_date: date | None = None
         self.day_allocations: list[TicketAllocation] = []
 
-        # Periodic auto-sync of the DB to the data repo. The fingerprint is
-        # what the DB looked like at the last successful sync; None forces
-        # the first tick to check, catching changes from before startup.
-        self._auto_sync_fingerprint: tuple[tuple[int, int] | None, ...] | None = None
-        self._auto_sync_running = False
-        self._auto_sync_last_error: str | None = None
+        # Auto-sync of the DB to the data repo, and auto-quit after a long
+        # session. Both run off a wall-clock heartbeat, not timers: asyncio's
+        # clock stops while a Mac sleeps, so "8 hours" would otherwise mean
+        # 8 hours awake and an overnight-asleep laptop would never quit.
+        self.sync_state = SyncState()
+        self._sync_lock = threading.Lock()
+        self._started_at = datetime.now()
+        self.auto_quit_at = self._started_at + AUTO_QUIT_AFTER
+        self._auto_quit_prompt_open = False
+        self._quitting = False
 
         # Privacy mode: hide earnings by default
         self.show_money = False
@@ -667,7 +646,11 @@ class TimesheetApp(App):
         yield Static(id="billing-header", classes="hidden")
         yield Container(TimesheetDataTable(id="billing-table"), id="billing-table-container", classes="hidden")
         yield Static(id="billing-summary", classes="hidden")
-        yield Footer()
+        # Docked widgets on the same edge overlap, so the status line and
+        # footer share one docked container instead.
+        with Vertical(id="bottom-bar"):
+            yield SyncStatusBar(id="sync-status")
+            yield Footer()
 
     def on_mount(self):
         self._setup_week_table()
@@ -695,49 +678,138 @@ class TimesheetApp(App):
         ).start()
         # Only ever auto-push the real DB, never a test or scratch one that
         # TIMESHEET_DB happens to point at.
-        if storage.DB_PATH.resolve() == storage.DEFAULT_DB_PATH.resolve():
-            self.set_interval(AUTO_SYNC_INTERVAL, self._auto_sync_tick)
+        self.sync_state.enabled = (
+            storage.DB_PATH.resolve() == storage.DEFAULT_DB_PATH.resolve()
+        )
+        self.set_interval(HEARTBEAT_SECONDS, self._heartbeat)
+        if self.sync_state.enabled:
+            # Check straight away so the status bar has something true to say.
+            self._sync_check()
+        self._refresh_sync_status()
 
-    def _auto_sync_tick(self) -> None:
-        """Push DB changes to the data repo if anything has been written."""
-        if self._auto_sync_running:
+    def _heartbeat(self) -> None:
+        """Once a minute: run a sync check if due, and auto-quit if overdue."""
+        now = datetime.now()
+        state = self.sync_state
+        if state.enabled and state.next_check and now >= state.next_check:
+            self._sync_check()
+        if (
+            now >= self.auto_quit_at
+            and not self._auto_quit_prompt_open
+            and not self._quitting
+        ):
+            self._auto_quit_prompt_open = True
+            self.push_screen(
+                AutoQuitScreen(
+                    _describe_duration(now - self._started_at),
+                    _describe_duration(AUTO_QUIT_EXTENSION),
+                ),
+                self._on_auto_quit_answer,
+            )
+        # Refresh even when nothing ran, so "today" timestamps roll over.
+        self._refresh_sync_status()
+
+    def _sync_check(self, force: bool = False) -> None:
+        """Push DB changes to the data repo if anything has been written.
+
+        The stat-based fingerprint makes the no-change case O(1): sync.sh
+        (and its O(n) dump) only runs when the DB has actually been touched.
+        """
+        state = self.sync_state
+        now = datetime.now()
+        state.next_check = now + SYNC_INTERVAL
+        if state.running or self._quitting:
             return
-        fingerprint = _db_fingerprint(storage.DB_PATH)
-        if fingerprint == self._auto_sync_fingerprint:
+        fingerprint = db_fingerprint(storage.DB_PATH)
+        if not force and fingerprint == state.fingerprint:
+            state.last_checked = now
+            state.last_outcome = "no changes since last sync"
+            self._refresh_sync_status()
             return
-        self._auto_sync_running = True
+        state.running = True
+        self._refresh_sync_status()
         threading.Thread(
-            target=self._auto_sync_bg, args=(fingerprint,), daemon=True,
+            target=self._sync_bg, args=(fingerprint,), daemon=True,
         ).start()
 
-    def _auto_sync_bg(self, fingerprint: tuple[tuple[int, int] | None, ...]) -> None:
+    def _sync_bg(self, fingerprint: Fingerprint) -> None:
         """Run sync.sh off the UI thread (git fetch/push can be slow)."""
-        result = _run_sync_push()
-        self.call_from_thread(self._on_auto_sync_done, fingerprint, result)
+        with self._sync_lock:
+            result = run_sync_push()
+        self.call_from_thread(self._on_sync_done, fingerprint, result)
 
-    def _on_auto_sync_done(
-        self,
-        fingerprint: tuple[tuple[int, int] | None, ...],
-        result: SyncResult,
-    ) -> None:
-        self._auto_sync_running = False
-        if result.ok:
-            # Fingerprint was taken before the push, so a write that landed
-            # mid-push still differs from it and gets picked up next tick.
-            self._auto_sync_fingerprint = fingerprint
-            self._auto_sync_last_error = None
-            if result.pushed:
-                self.notify("Timesheet data synced to remote")
-            return
-        # Keep retrying every tick, but only nag once per distinct failure.
-        if result.message != self._auto_sync_last_error:
-            self._auto_sync_last_error = result.message
+    def _on_sync_done(self, fingerprint: Fingerprint, result: SyncResult) -> None:
+        is_new_failure = self.sync_state.record(result, fingerprint, datetime.now())
+        self._refresh_sync_status()
+        if result.pushed:
+            self.notify("Timesheet data synced to remote")
+        elif is_new_failure:
             self.notify(
                 f"Auto-sync failed: {result.message}\n"
-                "Run ./sync.sh status to see why.",
+                "Press s for details.",
                 severity="warning",
                 timeout=30,
             )
+
+    def _refresh_sync_status(self) -> None:
+        if not self.is_running:
+            return
+        now = datetime.now()
+        text, level = self.sync_state.summary(now)
+        for bar in self.query("#sync-status").results(SyncStatusBar):
+            bar.show(text, level, format_when(self.auto_quit_at, now))
+
+    def action_show_sync_status(self) -> None:
+        if not isinstance(self.screen, SyncStatusScreen):
+            self.push_screen(SyncStatusScreen(self.sync_state))
+
+    def action_sync_now(self) -> None:
+        if not self.sync_state.enabled:
+            self.notify("Auto-sync is off: not using the default DB", severity="warning")
+        elif self.sync_state.running:
+            self.notify("Already syncing")
+        else:
+            self._sync_check(force=True)
+
+    def _on_auto_quit_answer(self, quit_now: bool | None) -> None:
+        self._auto_quit_prompt_open = False
+        if quit_now:
+            self._quit_with_final_sync(
+                f"Quit automatically after "
+                f"{_describe_duration(datetime.now() - self._started_at)}."
+            )
+        else:
+            self.auto_quit_at = datetime.now() + AUTO_QUIT_EXTENSION
+            self._refresh_sync_status()
+            self.notify(
+                f"Staying open — will ask again at "
+                f"{self.auto_quit_at.strftime('%H:%M')}"
+            )
+
+    def _quit_with_final_sync(self, reason: str) -> None:
+        """Push any last changes, then exit (even if the push fails)."""
+        if self._quitting:
+            return
+        self._quitting = True
+        if not self.sync_state.enabled:
+            self.exit(message=reason)
+            return
+        self.notify("Syncing before quitting…")
+        threading.Thread(
+            target=self._final_sync_bg, args=(reason,), daemon=True,
+        ).start()
+
+    def _final_sync_bg(self, reason: str) -> None:
+        # The lock waits out any periodic sync already in flight, so two
+        # sync.sh runs never race on the data repo.
+        with self._sync_lock:
+            result = run_sync_push()
+        if not result.ok:
+            reason += (
+                f"\nFinal sync failed: {result.message}\n"
+                "Run ./sync.sh status to see why."
+            )
+        self.call_from_thread(self.exit, message=reason)
 
     def _check_for_updates_bg(self) -> None:
         """Run the git probe off the UI thread; schedule UI updates by state."""

@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import os
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.coordinate import Coordinate
-from textual.widgets import Button, Checkbox, DataTable, Input, Label, TextArea
+from textual.widgets import Button, Checkbox, DataTable, Input, Label, Static, TextArea
 from textual.screen import ModalScreen
+from rich.text import Text
 
 import invoice
+from autosync import SYNC_INTERVAL, SyncState, format_when
 from models import InvoiceSettings, Ticket, TicketAllocation, TimeEntry
 import storage
 
@@ -2565,3 +2567,253 @@ class DeliverableBillTicketsScreen(ModalScreen[None]):
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+
+class SyncStatusScreen(ModalScreen[None]):
+    """Details of the periodic auto-sync, with a manual "Sync now".
+
+    Reads the app's live SyncState every second, so it updates in place
+    while a sync it started (or the periodic one) runs.
+    """
+
+    CSS = """
+    SyncStatusScreen {
+        align: center middle;
+    }
+
+    #sync-dialog {
+        width: 76;
+        height: auto;
+        max-height: 90%;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    #sync-title {
+        width: 100%;
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #sync-intro {
+        width: 100%;
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+
+    #sync-details {
+        width: 100%;
+    }
+
+    #sync-error {
+        width: 100%;
+        height: auto;
+        max-height: 12;
+        margin-top: 1;
+        padding: 0 1;
+        border: round $error;
+    }
+
+    #sync-buttons {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        align: center middle;
+    }
+
+    #sync-buttons Button {
+        width: auto;
+        min-width: 14;
+        margin: 0 2;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("s", "sync_now", "Sync now"),
+    ]
+
+    def __init__(self, state: SyncState):
+        super().__init__()
+        self.state = state
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="sync-dialog"):
+            yield Label("Auto-sync", id="sync-title")
+            yield Label(
+                "While the app is open, this machine's DB changes are pushed "
+                f"to the data repo every {int(SYNC_INTERVAL.total_seconds() // 60)} "
+                "minutes.",
+                id="sync-intro",
+            )
+            yield Static(id="sync-details")
+            with VerticalScroll(id="sync-error"):
+                yield Static(id="sync-error-text")
+            with Horizontal(id="sync-buttons"):
+                yield Button("Sync now (S)", variant="primary", id="sync-now")
+                yield Button("Close (Esc)", variant="default", id="close")
+
+    def on_mount(self) -> None:
+        self._render_state()
+        self.set_interval(1, self._render_state)
+        self.query_one("#close", Button).focus()
+
+    def _render_state(self) -> None:
+        state = self.state
+        now = datetime.now()
+
+        def when(moment: datetime | None, default: str = "—") -> str:
+            return format_when(moment, now) if moment else default
+
+        if not state.enabled:
+            status = Text("Off — the app isn't using the default DB", style="dim")
+        elif state.running:
+            status = Text("⟳ Syncing…", style="yellow")
+        elif state.error:
+            status = Text("⚠ Failed — details below", style="bold red")
+        elif state.last_checked:
+            status = Text("✓ In sync", style="green")
+        else:
+            status = Text("Not checked yet", style="dim")
+
+        last_check = when(state.last_checked)
+        if state.last_checked and state.last_outcome:
+            last_check += f" — {state.last_outcome}"
+        auto_quit = getattr(self.app, "auto_quit_at", None)
+
+        details = Text()
+        for label, value in (
+            ("Status", status),
+            ("Last push", Text(when(state.last_push, "none this session"))),
+            ("Last check", Text(last_check)),
+            ("Next check", Text(when(state.next_check))),
+            ("Auto-quit", Text(when(auto_quit))),
+        ):
+            details.append(f"{label:<12}", style="bold")
+            details.append_text(value)
+            details.append("\n")
+        details.rstrip()
+        self.query_one("#sync-details", Static).update(details)
+
+        error_box = self.query_one("#sync-error", VerticalScroll)
+        error_box.display = bool(state.error)
+        if state.error:
+            error_box.border_title = f"Last failure ({when(state.error_at)})"
+            self.query_one("#sync-error-text", Static).update(
+                Text(state.error_output)
+            )
+        self.query_one("#sync-now", Button).disabled = (
+            not state.enabled or state.running
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "sync-now":
+            self.action_sync_now()
+        else:
+            self.dismiss(None)
+
+    def action_sync_now(self) -> None:
+        self.app.action_sync_now()  # type: ignore[attr-defined]
+        self._render_state()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class AutoQuitScreen(ModalScreen[bool]):
+    """Countdown before the app quits itself after a long session.
+
+    Returns True to quit (also when the countdown runs out with nobody at
+    the keyboard), False to keep the app open a while longer.
+    """
+
+    CSS = """
+    AutoQuitScreen {
+        align: center middle;
+    }
+
+    #autoquit-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: thick $warning;
+    }
+
+    #autoquit-title {
+        width: 100%;
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #autoquit-message {
+        width: 100%;
+    }
+
+    #autoquit-buttons {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        align: center middle;
+    }
+
+    #autoquit-buttons Button {
+        width: auto;
+        min-width: 14;
+        margin: 0 2;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "keep_open", "Keep open"),
+        Binding("k", "keep_open", "Keep open"),
+        Binding("q", "quit_now", "Quit now"),
+    ]
+
+    def __init__(self, open_for: str, extension: str, grace_seconds: int = 120):
+        super().__init__()
+        self.open_for = open_for
+        self.extension = extension
+        self.remaining = grace_seconds
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="autoquit-dialog"):
+            yield Label("Still there?", id="autoquit-title")
+            yield Label(id="autoquit-message")
+            with Horizontal(id="autoquit-buttons"):
+                yield Button(
+                    f"Keep open {self.extension} (K)", variant="primary", id="keep",
+                )
+                yield Button("Quit now (Q)", variant="default", id="quit")
+
+    def on_mount(self) -> None:
+        self._render_message()
+        self.set_interval(1, self._tick)
+        self.query_one("#keep", Button).focus()
+
+    def _render_message(self) -> None:
+        minutes, seconds = divmod(max(self.remaining, 0), 60)
+        self.query_one("#autoquit-message", Label).update(
+            f"The app has been open for {self.open_for}. So it isn't left "
+            "running on this machine, it will sync and quit in "
+            f"{minutes}:{seconds:02d}."
+        )
+
+    def _tick(self) -> None:
+        self.remaining -= 1
+        if self.remaining <= 0:
+            self.dismiss(True)
+        else:
+            self._render_message()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "quit")
+
+    def action_keep_open(self) -> None:
+        self.dismiss(False)
+
+    def action_quit_now(self) -> None:
+        self.dismiss(True)

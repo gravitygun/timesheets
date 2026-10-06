@@ -108,6 +108,10 @@ not (and should not) sum to the bill.
 - `api.py` - Thin FastAPI HTTP wrapper around `storage.py`. No business
   logic of its own; new behaviour belongs in `storage.py` and the TUI
   picks it up for free. See README for endpoint list.
+- `autosync.py` - Periodic auto-sync while the TUI is open: O(1) stat
+  fingerprint of the DB to notice writes, then shells out to
+  `sync.sh push --if-changed` (all git logic stays in `sync.sh`). Also the
+  `SyncState` shown by the status line and `SyncStatusScreen`.
 - `sync_merge.py` - Three-way row merge used by `sync.sh pull --keep-local`
   to fold this machine's unsynced changes into an incoming dump. Stdlib
   only (it runs outside the venv), reads the live DB read-only, and refuses

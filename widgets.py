@@ -66,6 +66,29 @@ class CombinedHeader(Static):
             self.app.action_next_week()  # type: ignore[attr-defined]
 
 
+class SyncStatusBar(Static):
+    """One-line auto-sync status above the footer; click for details."""
+
+    LEVEL_STYLES = {
+        "ok": "green",
+        "busy": "yellow",
+        "error": "bold red",
+        "muted": "dim",
+    }
+
+    def show(self, text: str, level: str, auto_quit: str | None = None) -> None:
+        # Style spans rather than the whole Text, so the auto-quit note
+        # doesn't inherit the status colour (e.g. red on failure).
+        line = Text()
+        line.append(text, style=self.LEVEL_STYLES.get(level, ""))
+        if auto_quit:
+            line.append(f"  ·  auto-quit {auto_quit}", style="dim")
+        self.update(line)
+
+    def on_click(self) -> None:
+        self.app.action_show_sync_status()  # type: ignore[attr-defined]
+
+
 class WeeklySummary(Static):
     """Shows weekly hours breakdown by type."""
 

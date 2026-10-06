@@ -176,6 +176,7 @@ even if allocations drift later.
 | Key | Action                          |
 | --- | ------------------------------- |
 | `$` | Toggle earnings display         |
+| `s` | Auto-sync status / sync now     |
 | `?` | Show keyboard shortcuts         |
 | `q` | Quit                            |
 
@@ -311,6 +312,21 @@ the meantime, auto-sync refuses and shows a warning (once per distinct
 failure). It keeps retrying each tick until you reconcile as below.
 Auto-sync only runs against the default DB path, never a test or scratch
 DB that `TIMESHEET_DB` points elsewhere.
+
+The line above the footer always shows where things stand, e.g.
+`✓ In sync · last push 14:32 · checked 14:47` or, in red,
+`⚠ Sync failed 14:47 — press s for details`. Press `s` (or click the line)
+for the full picture: last push, last check and its outcome, next check,
+the full output of the last failure, and a **Sync now** button.
+
+### Auto-quit after 8 hours
+
+So that the app isn't left running on a laptop you walked away from, after
+8 hours it shows a two-minute countdown. Press `k` (or `Esc`) to keep it
+open for another hour. Otherwise it runs a final sync and quits cleanly, so
+`./run` stops the API and pushes as usual. The quit time is shown on the
+status line. Timing uses the wall clock, so a laptop that slept overnight
+still quits when it wakes.
 
 ### When both machines have changes
 
