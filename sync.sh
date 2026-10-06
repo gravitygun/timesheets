@@ -301,11 +301,17 @@ cmd_push() {
   # untracked files, so seeding a fresh data repo looked like "nothing to do".
   git add timesheet.sql
   if git diff --cached --quiet; then
-    green "No changes to push."
-    return 0
+    # Nothing new to commit, but an earlier commit may never have reached
+    # the remote (the push failed offline) — send that rather than strand it.
+    local unpushed
+    unpushed=$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)
+    if (( unpushed == 0 )); then
+      green "No changes to push."
+      return 0
+    fi
+  else
+    git commit -q -m "session $(hostname -s) $(date '+%Y-%m-%d %H:%M')"
   fi
-
-  git commit -q -m "session $(hostname -s) $(date '+%Y-%m-%d %H:%M')"
   git push -q
   green "Pushed."
 }
