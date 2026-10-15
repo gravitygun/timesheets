@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -85,6 +86,14 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+class _InvalidField(Exception):
+    """A form field holds a value that can't be saved."""
+
+    def __init__(self, field_id: str, message: str) -> None:
+        super().__init__(message)
+        self.field_id = field_id
 
 
 class EditDayScreen(ModalScreen[TimeEntry | None]):
@@ -255,16 +264,47 @@ class EditDayScreen(ModalScreen[TimeEntry | None]):
             if val in ("L", "S", "T", "P"):
                 self.query_one("#comment", Input).focus()
 
-    def _parse_time(self, val: str) -> time | None:
-        """Parse HH:MM to time object."""
-        val = val.strip()
+    def _value(self, field_id: str) -> str:
+        return self.query_one(f"#{field_id}", Input).value.strip()
+
+    def _parse_time(self, field_id: str, label: str) -> time | None:
+        """Parse an HH:MM field, or None if it's blank."""
+        val = self._value(field_id)
         if not val:
             return None
         try:
-            parts = val.split(":")
-            return time(int(parts[0]), int(parts[1]))
-        except (ValueError, IndexError):
+            hours, minutes = val.split(":")
+            return time(int(hours), int(minutes))
+        except ValueError:
+            raise _InvalidField(
+                field_id, f"{label} must be a time like 09:00, not '{val}'"
+            ) from None
+
+    def _parse_lunch(self) -> timedelta | None:
+        """Parse the lunch field as whole minutes, or None if it's blank."""
+        val = self._value("lunch")
+        if not val:
             return None
+        if not val.isdecimal():
+            raise _InvalidField(
+                "lunch", f"Lunch must be a whole number of minutes, not '{val}'"
+            )
+        return timedelta(minutes=int(val))
+
+    def _parse_adjustment(self) -> timedelta | None:
+        """Parse the adjustment field as hours, or None if it's blank."""
+        val = self._value("adjustment")
+        if not val:
+            return None
+        try:
+            hours = float(val)
+        except ValueError:
+            hours = math.nan
+        if not math.isfinite(hours):
+            raise _InvalidField(
+                "adjustment", f"Adjustment must be a number of hours, not '{val}'"
+            )
+        return timedelta(hours=hours)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
@@ -276,14 +316,24 @@ class EditDayScreen(ModalScreen[TimeEntry | None]):
         self.dismiss(None)
 
     def _save_entry(self) -> None:
-        clock_in = self._parse_time(self.query_one("#clock-in", Input).value)
-        clock_out = self._parse_time(self.query_one("#clock-out", Input).value)
-
-        lunch_val = self.query_one("#lunch", Input).value.strip()
-        lunch = timedelta(minutes=int(lunch_val)) if lunch_val else None
-
-        adj_val = self.query_one("#adjustment", Input).value.strip()
-        adjustment = timedelta(hours=float(adj_val)) if adj_val else None
+        try:
+            clock_in = self._parse_time("clock-in", "In")
+            clock_out = self._parse_time("clock-out", "Out")
+            lunch = self._parse_lunch()
+            adjustment = self._parse_adjustment()
+            if clock_in and clock_out:
+                day = date.min
+                span = datetime.combine(day, clock_out) - datetime.combine(day, clock_in)
+                if span <= timedelta():
+                    raise _InvalidField("clock-out", "Out must be later than In")
+                if lunch and lunch >= span:
+                    raise _InvalidField(
+                        "lunch", "Lunch must be shorter than the time between In and Out"
+                    )
+        except _InvalidField as exc:
+            self.app.notify(str(exc), severity="error")
+            self.query_one(f"#{exc.field_id}", Input).focus()
+            return
 
         adjust_type_val = self.query_one("#adjust-type", Input).value.strip().upper()
         adjust_type = adjust_type_val if adjust_type_val in ("L", "S", "T", "P") else None
@@ -1576,6 +1626,8 @@ class EditAllocationScreen(ModalScreen[tuple[str, str, str] | None]):
 
         try:
             hours = float(hours_str)
+            if not math.isfinite(hours):
+                raise ValueError(hours_str)
             if hours < 0:
                 self.app.notify("Hours must be positive", severity="error")
                 return

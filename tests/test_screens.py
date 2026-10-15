@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, time, timedelta
 
+import pytest
+from textual.app import App
+from textual.notifications import SeverityLevel
+from textual.widgets import Button, Input
 
 from models import Ticket, TimeEntry
 from screens import (
@@ -58,6 +63,97 @@ class TestEditDayScreen:
 
         assert screen.entry.clock_in is None
         assert screen.entry.clock_out is None
+
+
+class _EditDayHarness(App):
+    """Hosts an EditDayScreen and records what it dismisses with."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.results: list[TimeEntry | None] = []
+        self.errors: list[str] = []
+        self.focused_id: str | None = None
+
+    def on_mount(self) -> None:
+        entry = TimeEntry(date=date(2026, 10, 15), day_of_week="Thu")
+        self.push_screen(EditDayScreen(entry), self.results.append)
+
+    def notify(
+        self, message, *, severity: SeverityLevel = "information", **kwargs
+    ) -> None:
+        if severity == "error":
+            self.errors.append(str(message))
+        super().notify(message, severity=severity, **kwargs)
+
+
+def _save_day(**fields: str) -> _EditDayHarness:
+    """Fill in EditDayScreen fields (by input id), save, return the harness."""
+
+    async def run() -> _EditDayHarness:
+        app = _EditDayHarness()
+        async with app.run_test() as pilot:
+            screen = app.screen
+            assert isinstance(screen, EditDayScreen)
+            for field_id, value in fields.items():
+                screen.query_one(f"#{field_id.replace('_', '-')}", Input).value = value
+            await pilot.pause()  # let auto-advance on the type field settle
+            screen.query_one("#save", Button).press()
+            await pilot.pause()
+            app.focused_id = app.focused.id if app.focused else None
+        return app
+
+    return asyncio.run(run())
+
+
+class TestEditDayScreenValidation:
+    """Bad input in EditDayScreen is rejected, not crashed on or dropped."""
+
+    def test_valid_entry_saves(self):
+        app = _save_day(
+            clock_in="09:15", lunch="30", clock_out="17:30",
+            adjustment="1.5", adjust_type="T",
+        )
+
+        assert app.errors == []
+        [entry] = app.results
+        assert entry is not None
+        assert entry.clock_in == time(9, 15)
+        assert entry.lunch_duration == timedelta(minutes=30)
+        assert entry.clock_out == time(17, 30)
+        assert entry.adjustment == timedelta(hours=1.5)
+
+    def test_blank_fields_save_as_none(self):
+        app = _save_day()
+
+        assert app.errors == []
+        [entry] = app.results
+        assert entry is not None
+        assert entry.clock_in is None
+        assert entry.lunch_duration is None
+
+    @pytest.mark.parametrize(
+        ("fields", "bad_field"),
+        [
+            ({"clock_in": "09:15", "lunch": "3-", "clock_out": "17:30"}, "lunch"),
+            ({"lunch": "-30"}, "lunch"),
+            ({"lunch": "30.5"}, "lunch"),
+            ({"clock_in": "9.15"}, "clock-in"),
+            ({"clock_in": "25:00"}, "clock-in"),
+            ({"clock_out": "17:30:00"}, "clock-out"),
+            ({"adjustment": "abc", "adjust_type": "L"}, "adjustment"),
+            ({"adjustment": "nan", "adjust_type": "L"}, "adjustment"),
+            ({"adjustment": "inf", "adjust_type": "L"}, "adjustment"),
+            ({"clock_in": "17:30", "clock_out": "09:00"}, "clock-out"),
+            ({"clock_in": "09:00", "clock_out": "09:00"}, "clock-out"),
+            ({"clock_in": "09:00", "lunch": "60", "clock_out": "10:00"}, "lunch"),
+        ],
+    )
+    def test_invalid_input_is_rejected(self, fields, bad_field):
+        app = _save_day(**fields)
+
+        assert app.results == []  # dialog stays open, nothing saved
+        assert len(app.errors) == 1
+        assert app.focused_id == bad_field
 
 
 class TestEditTicketScreen:
