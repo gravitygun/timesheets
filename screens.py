@@ -11,7 +11,17 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.coordinate import Coordinate
-from textual.widgets import Button, Checkbox, DataTable, Input, Label, Static, TextArea
+from textual.widgets import (
+    Button,
+    Checkbox,
+    DataTable,
+    Input,
+    Label,
+    RadioButton,
+    RadioSet,
+    Static,
+    TextArea,
+)
 from textual.screen import ModalScreen
 from rich.text import Text
 
@@ -1771,7 +1781,11 @@ class MoveAllocationScreen(ModalScreen[date | None]):
 
 
 class ExportAllocationsScreen(ModalScreen[str | None]):
-    """Modal to configure and export allocations report to a text file."""
+    """Modal to export a month's allocations as a text report or as JSON.
+
+    The text report is for reading; the JSON is the input to the jira_sync
+    tool that copies allocations into the client's Jira as worklogs.
+    """
 
     CSS = """
     ExportAllocationsScreen {
@@ -1795,6 +1809,15 @@ class ExportAllocationsScreen(ModalScreen[str | None]):
         margin-bottom: 1;
     }
 
+    #export-format {
+        width: 100%;
+        layout: horizontal;
+    }
+
+    #export-format RadioButton {
+        margin-right: 2;
+    }
+
     #export-buttons {
         margin-top: 1;
         height: 3;
@@ -1810,18 +1833,21 @@ class ExportAllocationsScreen(ModalScreen[str | None]):
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
+    EXTENSIONS = {"text": "txt", "json": "json"}
+
     def __init__(self, year: int, month: int) -> None:
         super().__init__()
         self.initial_year = year
         self.initial_month = month
+        self.format = "text"
 
-    def compose(self) -> ComposeResult:
+    def _default_path(self, year: int, month: int) -> str:
         from pathlib import Path
 
-        default_path = str(
-            Path.home()
-            / f"time-allocations-{self.initial_year}-{self.initial_month:02d}.txt"
-        )
+        ext = self.EXTENSIONS[self.format]
+        return str(Path.home() / f"time-allocations-{year}-{month:02d}.{ext}")
+
+    def compose(self) -> ComposeResult:
         with Vertical(id="export-dialog"):
             yield Label("Export Allocations Report")
             yield Label("Month (YYYY-MM):")
@@ -1830,10 +1856,13 @@ class ExportAllocationsScreen(ModalScreen[str | None]):
                 value=f"{self.initial_year}-{self.initial_month:02d}",
                 placeholder="YYYY-MM",
             )
+            with RadioSet(id="export-format"):
+                yield RadioButton("Text report", value=True, id="format-text")
+                yield RadioButton("JSON for jira_sync", id="format-json")
             yield Label("Output file:")
             yield Input(
                 id="export-path",
-                value=default_path,
+                value=self._default_path(self.initial_year, self.initial_month),
             )
             with Horizontal(id="export-buttons"):
                 yield Button("Export", variant="primary", id="export-btn")
@@ -1842,27 +1871,30 @@ class ExportAllocationsScreen(ModalScreen[str | None]):
     def on_mount(self) -> None:
         self.query_one("#export-month", Input).focus()
 
+    def _refresh_default_path(self) -> None:
+        """Follow the month and format, unless the path has been hand-edited."""
+        month_str = self.query_one("#export-month", Input).value.strip()
+        try:
+            parts = month_str.split("-")
+            year = int(parts[0])
+            month = int(parts[1])
+        except (ValueError, IndexError):
+            return
+        if not (1 <= month <= 12 and 1900 <= year <= 2100):
+            return
+        path_input = self.query_one("#export-path", Input)
+        # Only update if it looks like the default pattern
+        if "time-allocations-" in path_input.value:
+            path_input.value = self._default_path(year, month)
+
     def on_input_changed(self, event: Input.Changed) -> None:
         """Update default path when month changes."""
         if event.input.id == "export-month":
-            from pathlib import Path
+            self._refresh_default_path()
 
-            month_str = event.value.strip()
-            try:
-                parts = month_str.split("-")
-                year = int(parts[0])
-                month = int(parts[1])
-                if 1 <= month <= 12 and 1900 <= year <= 2100:
-                    path_input = self.query_one("#export-path", Input)
-                    current = path_input.value
-                    # Only update if it looks like the default pattern
-                    if "time-allocations-" in current:
-                        path_input.value = str(
-                            Path.home()
-                            / f"time-allocations-{year}-{month:02d}.txt"
-                        )
-            except (ValueError, IndexError):
-                pass
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        self.format = "json" if event.pressed.id == "format-json" else "text"
+        self._refresh_default_path()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "export-month":
@@ -1901,6 +1933,35 @@ class ExportAllocationsScreen(ModalScreen[str | None]):
 
         output = Path(output_path).expanduser()
 
+        if self.format == "json":
+            import json
+
+            data = storage.get_allocations_export(year, month)
+            content = (
+                json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+                if data["allocations"] else ""
+            )
+        else:
+            content = "\n".join(self._text_report_lines(year, month))
+
+        if not content:
+            self.app.notify(
+                f"Nothing to export for {year}-{month:02d}", severity="warning",
+            )
+            return
+
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            self.app.notify(f"Failed to write file: {exc}", severity="error")
+            return
+
+        self.dismiss(str(output))
+
+    @staticmethod
+    def _text_report_lines(year: int, month: int) -> list[str]:
+        """The human-readable report: each day's allocations and descriptions."""
         from calendar import monthrange
         from itertools import groupby
 
@@ -1969,20 +2030,7 @@ class ExportAllocationsScreen(ModalScreen[str | None]):
                     lines.append(alloc.description)
                 lines.append("")
 
-        if not lines:
-            self.app.notify(
-                f"Nothing to export for {year}-{month:02d}", severity="warning",
-            )
-            return
-
-        try:
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text("\n".join(lines), encoding="utf-8")
-        except OSError as exc:
-            self.app.notify(f"Failed to write file: {exc}", severity="error")
-            return
-
-        self.dismiss(str(output))
+        return lines
 
 
 class InvoiceSettingsScreen(ModalScreen[bool]):

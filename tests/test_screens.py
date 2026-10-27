@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, time, timedelta
+from pathlib import Path
 
 import pytest
 from textual.app import App
 from textual.notifications import SeverityLevel
-from textual.widgets import Button, Input
+from textual.widgets import Button, Input, RadioButton
 
 from models import Ticket, TimeEntry
 from screens import (
@@ -16,6 +17,7 @@ from screens import (
     EditAllocationScreen,
     EditDayScreen,
     EditTicketScreen,
+    ExportAllocationsScreen,
     TicketManagementScreen,
     TicketSelectScreen,
     UpdateAvailableScreen,
@@ -290,3 +292,51 @@ class TestUpdateAvailableScreen:
         screen = UpdateAvailableScreen("main", 0, 2)
 
         assert screen.uncommitted == 0
+
+
+class _ExportHarness(App):
+    """Hosts ExportAllocationsScreen and records what it dismisses with."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.results: list[str | None] = []
+
+    def on_mount(self) -> None:
+        self.push_screen(ExportAllocationsScreen(2026, 10), self.results.append)
+
+
+class TestExportAllocationsScreenJson:
+    """The R dialog can write the JSON export for jira_sync."""
+
+    def test_json_format_writes_export(self, tmp_path, monkeypatch):
+        import json
+
+        import screens
+
+        doc = {"schema": "timesheets.allocations", "version": 1,
+               "allocations": [{"ticket_id": "1"}]}
+        monkeypatch.setattr(screens.storage, "get_allocations_export",
+                            lambda year, month: {**doc, "month": [year, month]})
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        async def run() -> tuple[_ExportHarness, str, str]:
+            app = _ExportHarness()
+            async with app.run_test() as pilot:
+                screen = app.screen
+                assert isinstance(screen, ExportAllocationsScreen)
+                path_input = screen.query_one("#export-path", Input)
+                text_path = path_input.value
+                screen.query_one("#format-json", RadioButton).value = True
+                await pilot.pause()
+                json_path = path_input.value
+                screen.query_one("#export-btn", Button).press()
+                await pilot.pause()
+            return app, text_path, json_path
+
+        app, text_path, json_path = asyncio.run(run())
+
+        assert text_path.endswith("time-allocations-2026-10.txt")
+        assert json_path.endswith("time-allocations-2026-10.json")
+        [written] = app.results
+        assert written == json_path
+        assert json.loads(Path(json_path).read_text())["month"] == [2026, 10]

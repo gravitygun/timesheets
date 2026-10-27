@@ -1531,3 +1531,48 @@ class TestContractConfig:
         assert retrieved.contract_start == date(2026, 5, 1)
         assert retrieved.contract_end == date(2027, 4, 30)
         assert retrieved.annual_max_points == 900
+
+
+class TestAllocationsExport:
+    """Tests for the JSON allocations export read by jira_sync."""
+
+    def test_export_shape(self, temp_database):
+        storage = temp_database
+        storage.save_ticket(Ticket(id="10400", description="C8: Pipelines"))
+        storage.save_ticket(Ticket(id="FD-1", description="Other project"))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="10400", date=date(2026, 10, 5), hours=Decimal("3.25"),
+            description="Reviewed the change", entered_on_client=True,
+        ))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="FD-1", date=date(2026, 10, 6), hours=Decimal("0.50"),
+        ))
+        # Outside the month: not exported
+        storage.save_allocation(TicketAllocation(
+            ticket_id="10400", date=date(2026, 11, 2), hours=Decimal("1"),
+        ))
+
+        data = storage.get_allocations_export(2026, 10)
+
+        assert data["schema"] == "timesheets.allocations"
+        assert data["version"] == 1
+        assert data["period"] == {"from": "2026-10-01", "to": "2026-10-31"}
+        assert data["tickets"] == {"10400": "C8: Pipelines", "FD-1": "Other project"}
+        assert data["allocations"] == [
+            {"ticket_id": "10400", "date": "2026-10-05", "hours": 3.25,
+             "description": "Reviewed the change", "entered_on_client": True},
+            {"ticket_id": "FD-1", "date": "2026-10-06", "hours": 0.5,
+             "description": "", "entered_on_client": False},
+        ]
+
+    def test_export_is_json_serialisable(self, temp_database):
+        import json
+
+        storage = temp_database
+        storage.save_ticket(Ticket(id="1", description="T"))
+        storage.save_allocation(TicketAllocation(
+            ticket_id="1", date=date(2026, 2, 28), hours=Decimal("7.5"),
+        ))
+        data = storage.get_allocations_export(2026, 2)
+        assert json.loads(json.dumps(data)) == data
+        assert data["period"]["to"] == "2026-02-28"

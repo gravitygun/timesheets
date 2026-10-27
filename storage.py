@@ -1082,6 +1082,50 @@ def mark_allocations_entered(
     return [(r["ticket_id"], date.fromisoformat(r["date"])) for r in rows]
 
 
+# Identifies the JSON allocations export; jira_sync refuses anything else.
+# Bump the version if a field changes meaning or goes away.
+ALLOCATIONS_EXPORT_SCHEMA = "timesheets.allocations"
+ALLOCATIONS_EXPORT_VERSION = 1
+
+
+def get_allocations_export(year: int, month: int) -> dict[str, object]:
+    """One calendar month's allocations as the JSON document jira_sync reads.
+
+    Ticket IDs are exported exactly as recorded here. Turning them into Jira
+    keys (adding the project prefix) is the sync tool's job, so the prefix can
+    be corrected on the client side without carrying a fresh export across.
+    """
+    from calendar import monthrange
+    from datetime import datetime
+
+    allocations = get_allocations_for_month(year, month)
+    tickets: dict[str, str] = {}
+    for tid in sorted({a.ticket_id for a in allocations}):
+        ticket = get_ticket(tid)
+        tickets[tid] = ticket.description if ticket else ""
+
+    return {
+        "schema": ALLOCATIONS_EXPORT_SCHEMA,
+        "version": ALLOCATIONS_EXPORT_VERSION,
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "period": {
+            "from": date(year, month, 1).isoformat(),
+            "to": date(year, month, monthrange(year, month)[1]).isoformat(),
+        },
+        "tickets": tickets,
+        "allocations": [
+            {
+                "ticket_id": a.ticket_id,
+                "date": a.date.isoformat(),
+                "hours": float(a.hours),
+                "description": a.description or "",
+                "entered_on_client": a.entered_on_client,
+            }
+            for a in allocations
+        ],
+    }
+
+
 def get_total_allocated_hours(d: date) -> Decimal:
     """Get the total hours allocated for a specific date."""
     conn = get_connection()
