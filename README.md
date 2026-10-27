@@ -139,7 +139,7 @@ Worked hours can be allocated to tickets (e.g., JIRA IDs) for billing reports.
 | `c` | Toggle "entered on client" flag (day view)                 |
 | `p` | Toggle "points entered" flag (allocations view)            |
 | `t` | Open ticket on selected row for editing (allocations view) |
-| `R` | Export allocations report (allocations view)               |
+| `R` | Export allocations: text report, or JSON for jira_sync     |
 
 **Week view indicators** (Alloc column):
 
@@ -259,6 +259,16 @@ automation (e.g. record-my-time) can keep billing tidy. Renaming a ticket
 via `PATCH` moves its allocations with it, so nothing is orphaned. The API
 deliberately does not expose config, work packages, billing, or ticket
 deletion - the TUI keeps full control of those.
+
+## Jira Worklog Sync
+
+[`jira_sync/`](jira_sync/README.md) holds a standalone tool that makes your
+worklogs in the client's Jira match a month of allocations, so they no longer
+need typing in by hand. Export the month with `R`, choosing **JSON for
+jira_sync**, then run the tool where Jira can be reached. It reconciles rather
+than appends, so it is safe to re-run, and it journals every change so it can
+be undone. See [jira_sync/README.md](jira_sync/README.md) for setup on the
+client site and a staged first run.
 
 ## Multi-Machine Setup
 
@@ -394,10 +404,11 @@ the merge is clean.
 3. Run checks before committing:
 
    ```bash
-   ruff check *.py          # Linting
-   pyright *.py             # Type checking
-   pytest tests/            # Unit tests
-   markdownlint *.md        # Markdown linting
+   ruff check *.py jira_sync/                   # Linting
+   ruff check --target-version py39 jira_sync/  # jira_sync runs on Python 3.9
+   pyright *.py jira_sync/*.py                  # Type checking
+   pytest tests/                                # Unit tests
+   markdownlint *.md jira_sync/*.md             # Markdown linting
    ```
 
 See [CLAUDE.md](CLAUDE.md) for coding conventions and design decisions.

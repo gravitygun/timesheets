@@ -117,6 +117,13 @@ not (and should not) sum to the bill.
   only (it runs outside the venv), reads the live DB read-only, and refuses
   the whole merge if any row was changed on both machines.
 - `run_api.sh` - Launcher for the API (binds `127.0.0.1:8765` by default)
+- `jira_sync/` - Standalone tool, run on the client site, that reconciles Jira
+  worklogs with the JSON allocations export (`storage.get_allocations_export`,
+  written by `R` → JSON). It must not import the app's modules: it is copied
+  across on its own and must stay Python 3.9-compatible with only `requests`
+  as a dependency. `mock_jira.py` is its stdlib-only stand-in Jira, for tests
+  and rehearsals. If the export's fields change meaning, bump
+  `ALLOCATIONS_EXPORT_VERSION` and the tool's `EXPORT_VERSION` together.
 - `import_data.py` - One-time import from Excel JSON (already run)
 - `tools/extract.py` - Excel extraction utility
 
@@ -138,9 +145,10 @@ not (and should not) sum to the bill.
 **Always run commands inside the venv.** Either activate it first or prefix commands:
 
 ```bash
-ruff check *.py          # Linting
-pyright *.py             # Type checking
-pytest tests/            # Unit tests
+ruff check *.py jira_sync/                   # Linting
+ruff check --target-version py39 jira_sync/  # jira_sync must run on 3.9
+pyright *.py jira_sync/*.py                  # Type checking
+pytest tests/                                # Unit tests
 ```
 
 All checks must pass with zero errors.

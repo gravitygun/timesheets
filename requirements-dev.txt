@@ -3,3 +3,4 @@ pyright
 pytest
 pytest-cov
 httpx
+requests
