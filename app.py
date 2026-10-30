@@ -39,6 +39,7 @@ from screens import (
     EditDayScreen,
     EditTicketScreen,
     ExportAllocationsScreen,
+    ExportBillScreen,
     FinaliseBillScreen,
     GenerateInvoiceScreen,
     InvoiceSettingsScreen,
@@ -514,6 +515,7 @@ class TimesheetApp(App):
         Binding("f", "finalise_billing", "Finalise"),
         Binding("i", "generate_invoice", "Invoice"),
         Binding("I", "invoice_settings", "Inv Setup"),
+        Binding("J", "export_bill", "Jira Bill"),
         Binding("s", "show_sync_status", "Sync"),
     ]
 
@@ -2318,6 +2320,10 @@ class TimesheetApp(App):
         # Invoice generation — any bill on screen (current or finalised)
         elif action == "generate_invoice":
             return mode == "billing" or False
+        # Jira bill export — any bill on screen; the action explains that only
+        # finalised ones export (the footer isn't refreshed on [ / ])
+        elif action == "export_bill":
+            return mode == "billing" or False
 
         # Ticket/deliverable management — always available
         elif action == "manage_tickets":
@@ -3846,6 +3852,36 @@ class TimesheetApp(App):
     def action_invoice_settings(self) -> None:
         """Open the invoice company/customer details editor."""
         self.push_screen(InvoiceSettingsScreen())
+
+    def action_export_bill(self) -> None:
+        """Export the finalised bill on screen as JSON for jira_sync."""
+        if self.view_mode != "billing":
+            return
+        period = self.billing_view_period
+        if period is None:
+            self.notify(
+                "Only a finalised bill can be exported for Jira: finalise "
+                "this one first, or use [ to step back to a finalised bill",
+                severity="warning",
+            )
+            return
+        config = storage.get_config()
+        data = storage.get_bill_export(
+            period[0], period[1],
+            hours_per_point=config.hours_per_point,
+            point_rate=config.point_rate,
+            vat_rate=config.vat_rate,
+            contract_start=config.contract_start,
+        )
+        if not data["lines"]:
+            self.notify("Nothing on this bill to export", severity="warning")
+            return
+
+        def handle_result(path: str | None) -> None:
+            if path:
+                self.notify(f"Bill for Jira saved to {path}")
+
+        self.push_screen(ExportBillScreen(data), handle_result)
 
     def action_generate_invoice(self) -> None:
         """Generate an HTML invoice for the bill currently on screen."""

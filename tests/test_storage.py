@@ -1576,3 +1576,46 @@ class TestAllocationsExport:
         data = storage.get_allocations_export(2026, 2)
         assert json.loads(json.dumps(data)) == data
         assert data["period"]["to"] == "2026-02-28"
+
+
+class TestBillExport:
+    """Tests for the JSON bill export read by jira_sync."""
+
+    def _bill_october(self, storage) -> None:
+        storage.save_ticket(Ticket(id="10400", description="C8", archived=True,
+                                   deliverable_id="WP2a-D1"))
+        storage.save_ticket(Ticket(id="10401", description="C9", archived=True,
+                                   deliverable_id="WP2a-D1"))
+        storage.save_ticket(Ticket(id="FD-1", description="FD work", archived=True,
+                                   deliverable_id="WP2a-D2"))
+        storage.save_ticket(Ticket(id="OPEN", description="Not closed",
+                                   deliverable_id="WP2a-D1"))
+        for tid, day, hours in (("10400", 6, "3"), ("10401", 7, "1.5"),
+                                ("FD-1", 8, "2"), ("OPEN", 9, "4")):
+            storage.save_allocation(TicketAllocation(
+                ticket_id=tid, date=date(2026, 10, day), hours=Decimal(hours),
+            ))
+        storage.finalise_bill(2026, 10, **_RATES)
+
+    def test_export_shape(self, temp_database):
+        storage = temp_database
+        self._bill_october(storage)
+
+        data = storage.get_bill_export(2026, 10, **_RATES)
+
+        assert data["schema"] == "timesheets.bill"
+        assert data["version"] == 1
+        assert data["billed"] == {"year": 2026, "month": 10}
+        assert data["delivered"] == {"year": 2026, "month": 10}
+        by_deliverable = {line["deliverable_id"]: line for line in data["lines"]}
+        d1 = by_deliverable["WP2a-D1"]
+        assert d1["points"] == 3  # 4.5h at 2h/point, rounded up
+        assert [t["ticket_id"] for t in d1["tickets"]] == ["10400", "10401"]
+        assert by_deliverable["WP2a-D2"]["points"] == 1
+        assert [t["ticket_id"] for t in by_deliverable["WP2a-D2"]["tickets"]] == ["FD-1"]
+        assert "amount_ex_vat" not in d1  # Jira only needs points
+
+    def test_only_finalised_bills(self, temp_database):
+        storage = temp_database
+        with pytest.raises(ValueError, match="isn't finalised"):
+            storage.get_bill_export(2026, 10, **_RATES)

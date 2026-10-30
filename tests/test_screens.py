@@ -18,6 +18,7 @@ from screens import (
     EditDayScreen,
     EditTicketScreen,
     ExportAllocationsScreen,
+    ExportBillScreen,
     TicketManagementScreen,
     TicketSelectScreen,
     UpdateAvailableScreen,
@@ -340,3 +341,41 @@ class TestExportAllocationsScreenJson:
         [written] = app.results
         assert written == json_path
         assert json.loads(Path(json_path).read_text())["month"] == [2026, 10]
+
+
+class _ExportBillHarness(App):
+    def __init__(self, data: dict) -> None:
+        super().__init__()
+        self.data = data
+        self.results: list[str | None] = []
+
+    def on_mount(self) -> None:
+        self.push_screen(ExportBillScreen(self.data), self.results.append)
+
+
+class TestExportBillScreen:
+    """J in the Billing view writes the bill for jira_sync."""
+
+    def test_writes_the_export(self, tmp_path, monkeypatch):
+        import json
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        data = {"schema": "timesheets.bill", "version": 1,
+                "billed": {"year": 2026, "month": 10},
+                "lines": [{"deliverable_id": "WP2a-D1", "points": 3,
+                           "tickets": [{"ticket_id": "10400"}]}]}
+
+        async def run() -> tuple[_ExportBillHarness, str]:
+            app = _ExportBillHarness(data)
+            async with app.run_test() as pilot:
+                screen = app.screen
+                assert isinstance(screen, ExportBillScreen)
+                path = screen.query_one("#bill-export-path", Input).value
+                screen.query_one("#export-btn", Button).press()
+                await pilot.pause()
+            return app, path
+
+        app, path = asyncio.run(run())
+        assert path.endswith("bill-2026-10.json")
+        assert app.results == [path]
+        assert json.loads(Path(path).read_text()) == data

@@ -2033,6 +2033,119 @@ class ExportAllocationsScreen(ModalScreen[str | None]):
         return lines
 
 
+class ExportBillScreen(ModalScreen[str | None]):
+    """Write a finalised bill as JSON for jira_sync to put into Jira.
+
+    ``data`` is the document from storage.get_bill_export; the dialog only
+    shows what it holds and asks where to write it.
+    """
+
+    CSS = """
+    ExportBillScreen {
+        align: center middle;
+    }
+
+    #bill-export-dialog {
+        width: 72;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    #bill-export-dialog Label {
+        margin-bottom: 1;
+    }
+
+    #bill-export-path {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    #bill-export-buttons {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+
+    #bill-export-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, data: dict) -> None:
+        super().__init__()
+        self.data = data
+
+    def compose(self) -> ComposeResult:
+        from calendar import month_name
+        from pathlib import Path
+
+        billed = self.data["billed"]
+        lines = self.data["lines"]
+        points = sum(line["points"] for line in lines)
+        tickets = sum(len(line["tickets"]) for line in lines)
+        default_path = Path.home() / f"bill-{billed['year']}-{billed['month']:02d}.json"
+        with Vertical(id="bill-export-dialog"):
+            yield Label("Export Bill for Jira")
+            yield Label(
+                f"{month_name[billed['month']]} {billed['year']}: "
+                f"{len(lines)} deliverable(s), {points} points, "
+                f"{tickets} ticket(s) to link",
+            )
+            unlinked = [line for line in lines if not line["deliverable_id"]]
+            if unlinked:
+                yield Label(
+                    f"Warning: {len(unlinked)} line(s) have no deliverable; "
+                    "jira_sync can't bill those.",
+                    classes="warning",
+                )
+            yield Label("Output file:")
+            yield Input(id="bill-export-path", value=str(default_path))
+            with Horizontal(id="bill-export-buttons"):
+                yield Button("Export", variant="primary", id="export-btn")
+                yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#bill-export-path", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._export()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "export-btn":
+            self._export()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _export(self) -> None:
+        import json
+        from pathlib import Path
+
+        path_str = self.query_one("#bill-export-path", Input).value.strip()
+        if not path_str:
+            self.app.notify("An output file is required", severity="error")
+            return
+        output = Path(path_str).expanduser()
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(self.data, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            self.app.notify(f"Failed to write file: {exc}", severity="error")
+            return
+        self.dismiss(str(output))
+
+
 class InvoiceSettingsScreen(ModalScreen[bool]):
     """Edit the fixed company / customer / bank details used on invoices."""
 

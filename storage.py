@@ -1987,6 +1987,65 @@ def get_bill_lines(year: int, month: int) -> list[DeliverableBillingLine]:
     ]
 
 
+BILL_EXPORT_SCHEMA = "timesheets.bill"
+BILL_EXPORT_VERSION = 1
+
+
+def get_bill_export(
+    year: int,
+    month: int,
+    hours_per_point: Decimal,
+    point_rate: Decimal,
+    vat_rate: Decimal,
+    contract_start: date | None = None,
+) -> dict[str, object]:
+    """A finalised bill as the JSON document jira_sync reads.
+
+    One line per deliverable with its points - the same figures as the
+    Billing view and the invoice - plus the tickets behind each line, which
+    jira_sync links to the deliverable's ticket in the billing project. No
+    money: Jira only needs points.
+
+    Only finalised bills: they are the figures that were invoiced. Raises
+    ValueError for a month that isn't finalised.
+    """
+    from datetime import datetime
+
+    if (year, month) not in set(get_finalised_bills()):
+        raise ValueError(f"the {year}-{month:02d} bill isn't finalised")
+    lines = get_bill_lines(year, month) or get_finalised_bill_summary(
+        year, month, hours_per_point, point_rate, vat_rate, contract_start,
+    )
+    delivered = get_finalised_bill_delivery_month(year, month)
+    return {
+        "schema": BILL_EXPORT_SCHEMA,
+        "version": BILL_EXPORT_VERSION,
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "billed": {"year": year, "month": month},
+        "delivered": (
+            {"year": delivered.year, "month": delivered.month}
+            if delivered else None
+        ),
+        "lines": [
+            {
+                "deliverable_id": line.deliverable_id,
+                "deliverable_title": line.deliverable_title,
+                "work_package_id": line.work_package_id,
+                "hours": float(line.hours),
+                "points": int(line.points),
+                "tickets": [
+                    {"ticket_id": t.ticket_id, "description": t.description,
+                     "hours": float(t.hours)}
+                    for t in get_tickets_for_deliverable_in_bill(
+                        line.deliverable_id, (year, month), contract_start,
+                    )
+                ],
+            }
+            for line in lines
+        ],
+    }
+
+
 def get_cumulative_point_budget(
     contract_start: date,
     up_to_year: int,
