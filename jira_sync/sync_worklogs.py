@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover - only on a machine not yet set up
     sys.exit("sync_worklogs needs the 'requests' package: "
              "pip install -r requirements.txt")
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 log = logging.getLogger("jira_sync")
 
@@ -1746,8 +1746,18 @@ def close_transition(ctx: Context, key: str) -> tuple[dict[str, Any] | None, str
             why = "no way to a done status" if not chosen else "several ways to close it"
             return None, f"{why} from here ({names}) - set close_transition in [billing]"
     transition = chosen[0]
+    fields = transition.get("fields") or {}
+    # The close screen may insist on more than a resolution (Fix Version/s,
+    # say); better to say so in the plan than have Jira refuse mid-run.
+    unfilled = sorted(str(spec.get("name") or field_id)
+                      for field_id, spec in fields.items()
+                      if field_id != "resolution" and spec.get("required")
+                      and not spec.get("hasDefaultValue"))
+    if unfilled:
+        return None, (f"closing via {transition.get('name')!r} asks for "
+                      f"{', '.join(unfilled)}, which the tool doesn't fill in")
     body: dict[str, Any] = {"transition": {"id": str(transition.get("id"))}}
-    resolution = (transition.get("fields") or {}).get("resolution")
+    resolution = fields.get("resolution")
     if resolution:
         allowed = [str(v.get("name")) for v in resolution.get("allowedValues") or []]
         if allowed and s.resolution.casefold() not in (a.casefold() for a in allowed):

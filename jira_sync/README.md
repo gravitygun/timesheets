@@ -448,11 +448,10 @@ from how its REST API documents it. The tool reads every new link back,
 fixes it if it's reversed, and verifies the whole bill at the end. Even so,
 confirm the direction in the browser the first time.
 
-1. **Read-only.** `plan` on September's bill (in the bundle) is a safe test.
-   September's tickets are closed, so it can only report. It should find
-   every one of your September tickets, and show `ok` and `linked` where
-   they match the bill. Any `closed` lines are differences from what you
-   entered by hand. Leave them: September is paid.
+1. **Read-only.** `plan bill-2026-10.json` writes nothing. Check that it
+   finds every one of your tickets for the month, that the story points
+   and closes look right (`Open -> Closed via 'Closed'`), and that nothing
+   is marked `missing`.
 2. **One points change.** When October's bill is finalised, run
    `apply bill-2026-10.json --step --no-close --limit 1`. Check the story
    points on that ticket in the browser.
@@ -470,22 +469,25 @@ confirm the direction in the browser the first time.
 
 ### What the plan lines mean
 
-| Plan line    | Meaning                                                                                       | `apply` does                                            |
-| ------------ | --------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| `points`     | Story points differ from the bill (or 0 for a deliverable not on it)                          | Sets them                                               |
-| `link`       | No "is delivered by" link to a work ticket behind the points                                  | Adds it                                                 |
-| `ok`         | Story points already right                                                                    | Nothing                                                 |
-| `linked`     | Link already there                                                                            | Nothing                                                 |
-| `extra-link` | An "is delivered by" link to a ticket that isn't on this bill line                            | Nothing: look at it                                     |
-| `reversed`   | A link of that type made the wrong way round                                                  | Nothing: fix it by hand                                 |
-| `close`      | Open ticket, to be closed once everything above it checks out                                 | Closes it, after re-reading Jira                        |
-| `missing`    | No ticket for a deliverable, two with the same name, an unknown ticket, or no way to close it | Refuses to run, unless `--skip-missing`                 |
-| `closed`     | Closed, but doesn't match the bill                                                            | Refuses to run, unless `--skip-missing`; never edits it |
+| Plan line    | Meaning                                                                                                                                                         | `apply` does                                            |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `points`     | Story points differ from the bill (or 0 for a deliverable not on it)                                                                                            | Sets them                                               |
+| `link`       | No "is delivered by" link to a work ticket behind the points                                                                                                    | Adds it                                                 |
+| `ok`         | Story points already right                                                                                                                                      | Nothing                                                 |
+| `linked`     | Link already there                                                                                                                                              | Nothing                                                 |
+| `extra-link` | An "is delivered by" link to a ticket that isn't on this bill line                                                                                              | Nothing: look at it                                     |
+| `reversed`   | A link of that type made the wrong way round                                                                                                                    | Nothing: fix it by hand                                 |
+| `close`      | Open ticket, to be closed once everything above it checks out                                                                                                   | Closes it, after re-reading Jira                        |
+| `missing`    | No ticket for a deliverable, two with the same name, an unknown ticket, or no way to close it (including a close screen that insists on more than a resolution) | Refuses to run, unless `--skip-missing`                 |
+| `closed`     | Closed, but doesn't match the bill                                                                                                                              | Refuses to run, unless `--skip-missing`; never edits it |
 
 Closing uses the workflow transition to a "done" status, preferring one that
 leads to "Closed". If the workflow has none, or several, name one with
-`close_transition` in `[billing]`. If closing asks for a resolution, it
-sends `Done`; change that with `resolution`.
+`close_transition` in `[billing]`: the name as it appears in the issue's
+Workflow menu. If closing asks for a resolution, it sends `Done`; change
+that with `resolution`. Other fields on the close screen are left as they
+are. If one of them is required, the plan marks the ticket `missing`, so
+you know before anything is written.
 
 The search pages through all of the billing project's Tasks, and the naming
 convention picks out yours. It doesn't use Jira's text search, which indexes

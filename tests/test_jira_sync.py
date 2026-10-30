@@ -1537,3 +1537,26 @@ class TestMoves:
         assert "then deletes worklog" in capsys.readouterr().out
         assert len(rig.worklogs("MPIT-1")) == 1
         assert rig.worklogs("MPIT-2") == []
+
+
+def test_close_screen_needing_more_than_a_resolution_blocks(billing, monkeypatch, capsys):
+    real = sw.JiraClient.transitions
+
+    def demanding(self, key):
+        found = real(self, key)
+        for transition in found:
+            transition["fields"] = {**transition["fields"], "fixVersions": {
+                "required": True, "name": "Fix Version/s", "hasDefaultValue": False},
+                "assignee": {"required": True, "name": "Assignee",
+                             "hasDefaultValue": True},
+                "comment": {"required": False, "name": "Comment"}}
+        return found
+
+    monkeypatch.setattr(sw.JiraClient, "transitions", demanding)
+    billing.write([("WP2d-D1", 7, [])])
+    assert billing.run("plan") == sw.EXIT_OK
+    out = capsys.readouterr().out
+    assert "closing via 'Close Issue' asks for Fix Version/s, which the tool doesn't fill in" in out
+    assert "Assignee" not in out and "Comment" not in out
+    assert billing.run("apply", "--yes") == sw.EXIT_JIRA
+    assert billing.rig.writes() == []
