@@ -1,8 +1,13 @@
-# jira_sync: timesheets allocations into Jira worklogs
+# jira_sync: timesheets into the client's Jira
 
-`sync_worklogs.py` makes your worklogs in the client's Jira (Data Center 8.x)
-match a month of timesheets allocations. It replaces typing them in by hand
-from the text report.
+`sync_worklogs.py` does two jobs in the client's Jira (Data Center 8.x) that
+used to be done by hand:
+
+- **Worklogs:** it makes your worklogs match a month of timesheets
+  allocations, replacing typing them in from the text report.
+- **Bills:** for a finalised bill, it sets the story points on that month's
+  deliverable tickets in the billing project and links each one to the work
+  tickets behind its points. See [Bills](#bills-story-points-and-links).
 
 It **reconciles** rather than appends: for each allocation it looks at *your*
 worklogs on that issue that day, then does whatever makes the two agree.
@@ -13,8 +18,13 @@ What it will never do:
 
 - write anything unless you run `apply` and type `yes` (or pass `--yes`)
 - touch anyone else's worklogs
-- touch issues that aren't in the export, or days outside the export's month
-- delete anything unless you add `--delete-extra`
+- touch issues that aren't in the export, except to move a worklog off one,
+  or days outside the export's month
+- delete a worklog unless you add `--delete-extra`, or it's the old half of
+  a [move](#moving-allocations-between-tickets); for bills, never remove a
+  link
+- touch billing tickets other than your own for the bill's month
+- edit a closed billing ticket, or close one that doesn't match the bill
 - create a worklog for an allocation that timesheets says you already
   entered, unless you add `--create-entered`, since that usually means your
   hand-entered worklog wasn't recognised
@@ -317,8 +327,10 @@ python sync_worklogs.py verify time-allocations-YYYY-MM.json --changes-only
 ```
 
 If you change an allocation's hours in timesheets after syncing, export
-again and re-run `apply`; it corrects the worklog's time in place. Comments
-are another matter: see below.
+again and re-run `apply`; it corrects the worklog's time in place. If you
+move one to another ticket, `apply` moves the worklog too; see
+[moving allocations](#moving-allocations-between-tickets). Comments are
+another matter: see below.
 
 ## Reviewing changes and editing comments
 
@@ -356,6 +368,159 @@ Edited comments are saved in the journals folder as you go
 answered `no` at the end, the edits aren't lost. Start the next run from
 them with `--edits FILE`, with or without `--step`.
 
+## Bills: story points and links
+
+Each month someone else creates a ticket per deliverable in the billing
+project (`PITLAI`), named like `WB-WP2d-D1-October-2026`, with projected
+points that are usually way off. Given a finalised bill, the tool:
+
+- finds **your** tickets for the bill's month by that naming convention, so
+  anyone else's tickets and other months' are never touched;
+- sets each one's story points (`customfield_10002`) to the bill's figure
+  for its deliverable, and to `0` for deliverables not on the bill, so
+  nothing unbilled is billable;
+- adds an "is delivered by" link from each deliverable's ticket to every
+  work ticket behind its points: the same list as the Billing view's
+  drill-down, mapped to Jira keys as for worklogs (`FD-2587` →
+  `MPITFD-2587`);
+- then **closes** every one of those tickets, the ones set to 0 included,
+  because a ticket gets paid only once it's closed. Before closing, it
+  re-reads Jira and closes only the tickets that now match the bill exactly.
+  Any that don't are left open and reported.
+
+It never removes a link. A link to a ticket not on the bill line is reported
+as `extra-link`, and one made the wrong way round as `reversed`, for you to
+look at.
+
+It never edits a closed ticket either. One that's closed but doesn't match
+the bill shows as `closed`, and you reopen it by hand if it really needs
+changing. That keeps reopening something already submitted for payment a
+deliberate act. `undo` will reopen tickets it closed itself.
+
+### Set-up
+
+In `~/.jira-sync/config.ini`, add a `[billing]` section with at least your
+initials. The other settings default to the values above; see
+`config.example.ini`.
+
+```ini
+[billing]
+initials = WB
+```
+
+`check` should then show the billing lines. Look for `(Story Points)` after
+the field, and the link type that reads "is delivered by":
+
+```text
+Billing:    PITLAI tickets named like WB-WP2d-D1-October-2026
+            points in customfield_10002 (Story Points); links read 'is delivered by' (type ...)
+```
+
+### Each month
+
+1. In timesheets, finalise the bill, then press `J` in the Billing view.
+   That writes `~/bill-YYYY-MM.json`. Only finalised bills export, because
+   they're the figures that were invoiced.
+2. Take it across with the month's allocations export.
+3. On HS, run the same commands as for worklogs; the tool recognises a bill
+   export:
+
+```bash
+python sync_worklogs.py plan   bill-2026-10.json
+python sync_worklogs.py apply  bill-2026-10.json --step
+python sync_worklogs.py verify bill-2026-10.json        # IN SYNC, exit 0
+```
+
+`--step` walks through each change, as for worklogs: points and links
+first, then the closes. `--no-close` leaves the tickets open for a run, so
+you can look them over in the browser before a later `apply` closes them.
+`undo` reverses a bill run, newest change first: it reopens the tickets it
+closed, puts the old points back, and removes the links it made.
+
+The tickets are named for the month the work was **delivered**, as the
+invoice is. If a bill's tickets carry another month's name, `--month YYYY-MM`
+says which.
+
+### First run
+
+One worry is specific to links. Jira 8 can make a link the other way round
+from how its REST API documents it. The tool reads every new link back,
+fixes it if it's reversed, and verifies the whole bill at the end. Even so,
+confirm the direction in the browser the first time.
+
+1. **Read-only.** `plan` on September's bill (in the bundle) is a safe test.
+   September's tickets are closed, so it can only report. It should find
+   every one of your September tickets, and show `ok` and `linked` where
+   they match the bill. Any `closed` lines are differences from what you
+   entered by hand. Leave them: September is paid.
+2. **One points change.** When October's bill is finalised, run
+   `apply bill-2026-10.json --step --no-close --limit 1`. Check the story
+   points on that ticket in the browser.
+3. **One link.** Run the same command again; this time the first change is
+   a link. In the browser, the deliverable ticket should show
+   **is delivered by** `MPIT-…`, and the work ticket **delivers**
+   `PITLAI-…`.
+4. **Undo both and redo.** Run `undo` on each journal, newest first, then
+   the same `apply` again.
+5. **Then the rest, still open.** Run
+   `apply bill-2026-10.json --step --no-close`, and look the tickets over in
+   the browser.
+6. **Close them.** Run `apply bill-2026-10.json --step`, which now consists
+   only of the closes, and then `verify`.
+
+### What the plan lines mean
+
+| Plan line    | Meaning                                                                                       | `apply` does                                            |
+| ------------ | --------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `points`     | Story points differ from the bill (or 0 for a deliverable not on it)                          | Sets them                                               |
+| `link`       | No "is delivered by" link to a work ticket behind the points                                  | Adds it                                                 |
+| `ok`         | Story points already right                                                                    | Nothing                                                 |
+| `linked`     | Link already there                                                                            | Nothing                                                 |
+| `extra-link` | An "is delivered by" link to a ticket that isn't on this bill line                            | Nothing: look at it                                     |
+| `reversed`   | A link of that type made the wrong way round                                                  | Nothing: fix it by hand                                 |
+| `close`      | Open ticket, to be closed once everything above it checks out                                 | Closes it, after re-reading Jira                        |
+| `missing`    | No ticket for a deliverable, two with the same name, an unknown ticket, or no way to close it | Refuses to run, unless `--skip-missing`                 |
+| `closed`     | Closed, but doesn't match the bill                                                            | Refuses to run, unless `--skip-missing`; never edits it |
+
+Closing uses the workflow transition to a "done" status, preferring one that
+leads to "Closed". If the workflow has none, or several, name one with
+`close_transition` in `[billing]`. If closing asks for a resolution, it
+sends `Done`; change that with `resolution`.
+
+The search pages through all of the billing project's Tasks, and the naming
+convention picks out yours. It doesn't use Jira's text search, which indexes
+`WB-WP5-D4-September-2026` as one single word, so that searching for
+`September` finds nothing. If paging through the whole project is slow, set
+`jql` in `[billing]` to narrow it, for example
+`project = PITLAI AND created >= startOfMonth(-1)`.
+
+## Moving allocations between tickets
+
+When you move an allocation from one ticket to another in timesheets, Jira
+still has the worklog on the old issue. A fresh export then shows a worklog
+to create on the new issue, and a stray one on the old issue with no
+allocation behind it. Rather than create a duplicate, the tool pairs them
+into a single `move`:
+
+```text
+MPIT-10836  Review and test the core platform configuration migration (10394, C1)
+   [13] move       2026-10-20 Tue  45m      worklog 100068 from MPIT-10394, "Picked up C1 and..."
+```
+
+`apply` then creates the worklog on the new issue, with the old one's
+comment (yours, edits and all) and start time, and only after that deletes
+the old one, so the time is never missing from Jira. Both halves go in the
+journal, so `undo` puts it back where it was.
+
+A pair needs the same day and the same length, and nothing else that
+could match either side. If a day has several candidates of the same length,
+a matching comment settles it, or they're left alone as a `create` and an
+`extra` or `unexpected`, for you to sort out. Moving an allocation to another
+*day* isn't paired; that shows as a `create` and an `extra`.
+
+The move is found even when you run with `--issue` for the new ticket only,
+so narrowing a run can't turn a move into a copy.
+
 ## How ticket IDs become Jira keys
 
 In order, first match wins:
@@ -378,17 +543,23 @@ Each allocation is paired with **your** worklogs on the same issue on the
 same day. Days are judged in your Jira profile's timezone, or `[sync]
 timezone` if you set it.
 
-| Plan line    | Meaning                                                                           | `apply` does                            |
-| ------------ | --------------------------------------------------------------------------------- | --------------------------------------- |
-| `create`     | No worklog of yours that day                                                      | Creates one                             |
-| `update`     | One worklog, but the time differs (or the comment, with `update_comments = true`) | Edits it in place                       |
-| `ok`         | Already matches, or several worklogs that add up                                  | Nothing                                 |
-| `conflict`   | Several worklogs that **don't** add up                                            | Nothing: fix by hand                    |
-| `extra`      | Your worklog on a day with no allocation for that issue                           | Nothing, unless `--delete-extra`        |
-| `delete`     | An `extra` when `--delete-extra` is given                                         | Deletes it                              |
-| `unexpected` | Your time this month on an issue the export doesn't have                          | Nothing: check by hand                  |
-| `missing`    | The issue couldn't be read (not found, no permission)                             | Refuses to run, unless `--skip-missing` |
-| `skip`       | Ticket ID isn't a Jira key, or is mapped to skip                                  | Nothing                                 |
+It also searches Jira for every worklog of yours in the month, on any issue.
+So time logged against an issue the export doesn't mention shows up too, as
+`unexpected`: logged by hand on the wrong ticket, say, or left behind by an
+allocation you've since moved.
+
+| Plan line    | Meaning                                                                                     | `apply` does                               |
+| ------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `create`     | No worklog of yours that day                                                                | Creates one                                |
+| `update`     | One worklog, but the time differs (or the comment, with `update_comments = true`)           | Edits it in place                          |
+| `ok`         | Already matches, or several worklogs that add up                                            | Nothing                                    |
+| `conflict`   | Several worklogs that **don't** add up                                                      | Nothing: fix by hand                       |
+| `move`       | Your worklog belongs on another issue now: see [moves](#moving-allocations-between-tickets) | Creates it there, then deletes the old one |
+| `extra`      | Your worklog on a day with no allocation for that issue                                     | Nothing, unless `--delete-extra`           |
+| `delete`     | An `extra` when `--delete-extra` is given                                                   | Deletes it                                 |
+| `unexpected` | Your time this month on an issue the export doesn't have                                    | Nothing: check by hand                     |
+| `missing`    | The issue couldn't be read (not found, no permission)                                       | Refuses to run, unless `--skip-missing`    |
+| `skip`       | Ticket ID isn't a Jira key, or is mapped to skip                                            | Nothing                                    |
 
 With `update_comments = true`, comments are compared ignoring trailing
 whitespace and line-ending style.
@@ -403,11 +574,11 @@ them, so `--limit N` makes the first N.
 
 ```text
 sync_worklogs.py check  [--issue ID]
-sync_worklogs.py plan   EXPORT [scope] [--limit N]
+sync_worklogs.py plan   EXPORT [scope] [--limit N] [--month YYYY-MM] [--no-close]
 sync_worklogs.py apply  EXPORT [scope] [--limit N] [--yes] [--skip-missing]
                         [--create-entered] [--step | --edit | --review MODE]
-                        [--edits FILE]
-sync_worklogs.py verify EXPORT [scope]
+                        [--edits FILE] [--month YYYY-MM] [--no-close]
+sync_worklogs.py verify EXPORT [scope] [--month YYYY-MM] [--no-close]
 sync_worklogs.py undo   JOURNAL [--yes] [--force]
 
 scope:  --issue ID          a ticket ID (10400) or key (MPIT-10400); repeatable

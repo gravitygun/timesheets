@@ -33,14 +33,15 @@ import re
 import shlex
 import shutil
 import stat
+import string
 import subprocess
 import sys
 import tempfile
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time as dtime, timedelta, tzinfo
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     import requests
@@ -48,7 +49,7 @@ except ImportError:  # pragma: no cover - only on a machine not yet set up
     sys.exit("sync_worklogs needs the 'requests' package: "
              "pip install -r requirements.txt")
 
-__version__ = "0.2.0"
+__version__ = "0.4.0"
 
 log = logging.getLogger("jira_sync")
 
@@ -70,17 +71,18 @@ JIRA_TIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%f%z"
 ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*-[0-9]+$")
 PROJECT_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
-# Plan action kinds. Only the first three write to Jira.
+# Plan action kinds. Only the first four write to Jira.
 CREATE = "create"
 UPDATE = "update"
 DELETE = "delete"
+MOVE = "move"
 OK = "ok"
 CONFLICT = "conflict"
 EXTRA = "extra"
 UNEXPECTED = "unexpected"
 MISSING = "missing"
 SKIP = "skip"
-WRITES = (CREATE, UPDATE, DELETE)
+WRITES = (CREATE, UPDATE, DELETE, MOVE)
 
 # How apply lets you look over its changes before sending them.
 REVIEW_MODES = ("none", "step", "editor")
@@ -124,6 +126,15 @@ class Settings:
     adjust_estimate: str = "auto"
     update_comments: bool = False
     review: str = "none"
+    billing_project: str = "PITLAI"
+    billing_initials: str = ""
+    billing_summary: str = "{initials}-{deliverable}-{month}-{year}"
+    billing_issue_type: str = "Task"
+    billing_jql: str = ""
+    points_field: str = "customfield_10002"
+    link_description: str = "is delivered by"
+    close_transition: str = ""
+    resolution: str = "Done"
     journal_dir: Path = DEFAULT_HOME / "journals"
 
 
@@ -172,7 +183,7 @@ def load_settings(path: Path) -> Settings:
         parser.read(path, encoding="utf-8")
     except configparser.Error as exc:
         raise ConfigError(f"cannot parse {path}: {exc}") from None
-    for name in ("jira", "sync", "project_map", "issue_map"):
+    for name in ("jira", "sync", "billing", "project_map", "issue_map"):
         if not parser.has_section(name):
             parser.add_section(name)
     jira = parser["jira"]
@@ -255,6 +266,13 @@ def load_settings(path: Path) -> Settings:
     if review not in REVIEW_MODES:
         raise ConfigError(f"[sync] review must be one of {', '.join(REVIEW_MODES)}")
 
+    billing = parser["billing"]
+    billing_summary = billing.get("summary_format", Settings.billing_summary).strip()
+    _check_placeholders("[billing] summary_format", billing_summary,
+                        require_deliverable=True)
+    billing_jql = billing.get("jql", "").strip()
+    _check_placeholders("[billing] jql", billing_jql, require_deliverable=False)
+
     issue_map: dict[str, str] = {}
     for ticket_id, target in parser["issue_map"].items():
         target = target.strip()
@@ -282,9 +300,37 @@ def load_settings(path: Path) -> Settings:
         adjust_estimate=adjust,
         update_comments=_get_bool(sync, "update_comments", False),
         review=review,
+        billing_project=billing.get("project", "PITLAI").strip().upper().rstrip("-"),
+        billing_initials=billing.get("initials", "").strip(),
+        billing_summary=billing_summary,
+        billing_issue_type=billing.get("issue_type", "Task").strip(),
+        billing_jql=billing_jql,
+        points_field=billing.get("points_field", "customfield_10002").strip(),
+        link_description=billing.get("link_description", "is delivered by").strip(),
+        close_transition=billing.get("close_transition", "").strip(),
+        resolution=billing.get("resolution", "Done").strip(),
         journal_dir=Path(sync.get("journal_dir", "~/.jira-sync/journals")
                          .strip()).expanduser(),
     )
+
+
+# Placeholders a billing ticket's summary_format may use.
+SUMMARY_FIELDS = ("initials", "deliverable", "month", "mon", "mm", "year")
+
+
+def _check_placeholders(what: str, text: str, *, require_deliverable: bool) -> None:
+    try:
+        names = {name for _, name, _, _ in string.Formatter().parse(text)
+                 if name is not None}
+    except ValueError as exc:
+        raise ConfigError(f"{what}: {exc}") from None
+    allowed = set(SUMMARY_FIELDS) - (set() if require_deliverable else {"deliverable"})
+    unknown = names - allowed
+    if unknown:
+        raise ConfigError(f"{what}: unknown placeholder {{{sorted(unknown)[0]}}}; "
+                          f"use {', '.join('{' + n + '}' for n in sorted(allowed))}")
+    if require_deliverable and "deliverable" not in names:
+        raise ConfigError(f"{what} must contain {{deliverable}}")
 
 
 def issue_key_for(ticket_id: str, settings: Settings) -> str | None:
@@ -423,16 +469,29 @@ class Export:
     allocations: list[ExportedAllocation]
 
 
-def load_export(path: Path) -> Export:
+def _read_json(path: Path) -> Any:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from None
     except ValueError as exc:
         raise ConfigError(f"{path} is not valid JSON: {exc}") from None
+
+
+def read_export(path: Path) -> Export | BillExport:
+    """An allocations export or a bill export, whichever the file is."""
+    data = _read_json(path)
+    if isinstance(data, dict) and data.get("schema") == BILL_SCHEMA:
+        return _parse_bill(path, data)
+    return load_export(path, data)
+
+
+def load_export(path: Path, data: Any = None) -> Export:
+    if data is None:
+        data = _read_json(path)
     if not isinstance(data, dict) or data.get("schema") != EXPORT_SCHEMA:
-        raise ConfigError(f"{path} is not a timesheets allocations export "
-                          "(export with R, format JSON)")
+        raise ConfigError(f"{path} is not a timesheets export (R in the "
+                          "allocations view, or J in the Billing view)")
     if data.get("version") != EXPORT_VERSION:
         raise ConfigError(f"{path} is export version {data.get('version')}; "
                           f"sync_worklogs {__version__} reads version "
@@ -622,10 +681,42 @@ class JiraClient:
     def myself(self) -> dict[str, Any]:
         return self._call("GET", "myself") or {}
 
-    def issue(self, key: str) -> dict[str, Any] | None:
-        return self._call("GET", f"issue/{key}",
-                          params={"fields": "summary,status,project"},
+    def issue(self, key: str,
+              fields: str = "summary,status,project") -> dict[str, Any] | None:
+        return self._call("GET", f"issue/{key}", params={"fields": fields},
                           missing_ok=True)
+
+    def set_field(self, key: str, field_id: str, value: Any) -> None:
+        self._call("PUT", f"issue/{key}", body={"fields": {field_id: value}})
+
+    def fields(self) -> list[dict[str, Any]]:
+        return self._call("GET", "field") or []
+
+    def link_types(self) -> list[dict[str, Any]]:
+        return (self._call("GET", "issueLinkType") or {}).get("issueLinkTypes", [])
+
+    def create_link(self, type_name: str, inward_key: str, outward_key: str) -> None:
+        """Link two issues. Jira's documented reading: inward [inward] outward."""
+        self._call("POST", "issueLink", body={
+            "type": {"name": type_name},
+            "inwardIssue": {"key": inward_key},
+            "outwardIssue": {"key": outward_key},
+        })
+
+    def transitions(self, key: str) -> list[dict[str, Any]]:
+        """Transitions open to you from the issue's status, with their fields."""
+        return (self._call("GET", f"issue/{key}/transitions",
+                           params={"expand": "transitions.fields"}) or {}
+                ).get("transitions", [])
+
+    def transition(self, key: str, body: dict[str, Any]) -> None:
+        self._call("POST", f"issue/{key}/transitions", body=body)
+
+    def link(self, link_id: str) -> dict[str, Any] | None:
+        return self._call("GET", f"issueLink/{link_id}", missing_ok=True)
+
+    def delete_link(self, link_id: str) -> None:
+        self._call("DELETE", f"issueLink/{link_id}")
 
     def worklogs(self, key: str) -> list[dict[str, Any]]:
         """Every worklog on an issue.
@@ -668,11 +759,11 @@ class JiraClient:
         self._call("DELETE", f"issue/{key}/worklog/{worklog_id}",
                    params={"adjustEstimate": adjust})
 
-    def search(self, jql: str) -> list[dict[str, Any]]:
+    def search(self, jql: str, fields: str = "summary") -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
         while True:
             page = self._call("GET", "search", params={
-                "jql": jql, "fields": "summary",
+                "jql": jql, "fields": fields,
                 "startAt": len(issues), "maxResults": 100,
             }) or {}
             batch = page.get("issues", [])
@@ -930,6 +1021,59 @@ def find_unexpected(ctx: Context, selection: Selection,
     return states
 
 
+def pair_moves(actions: list[Action], *, update_comments: bool) -> list[Action]:
+    """Turn a stray worklog plus a new one elsewhere into a single move.
+
+    Moving an allocation to another ticket in timesheets looks like this from
+    Jira: a worklog to create on the new issue, and the old one left with no
+    allocation behind it, on the same day and the same length. Such pairs
+    become a move: create the new worklog, then delete the old. Only pairs
+    with no rival on either side count; where a day has several candidates of
+    the same length, matching comments must settle it, or they're left alone.
+    """
+    creates = [a for a in actions if a.kind == CREATE and a.allocation]
+    strays = [a for a in actions if a.kind in (EXTRA, DELETE, UNEXPECTED) and a.worklogs]
+
+    def same_slot(stray: Action, create: Action) -> bool:
+        wl, alloc = stray.worklogs[0], create.allocation
+        return (alloc is not None and wl.day == create.day and wl.seconds == alloc.seconds
+                and wl.issue_key != create.issue_key)
+
+    def same_comment(stray: Action, create: Action) -> bool:
+        alloc = create.allocation
+        return (alloc is not None
+                and norm_comment(stray.worklogs[0].comment) == norm_comment(alloc.comment))
+
+    def unrivalled(pairs: list[tuple[Action, Action]]) -> list[tuple[Action, Action]]:
+        strays_seen = [id(s) for s, _ in pairs]
+        creates_seen = [id(c) for _, c in pairs]
+        return [(s, c) for s, c in pairs
+                if strays_seen.count(id(s)) == 1 and creates_seen.count(id(c)) == 1]
+
+    candidates = [(s, c) for s in strays for c in creates if same_slot(s, c)]
+    chosen = unrivalled(candidates)
+    used = {id(x) for pair in chosen for x in pair}
+    chosen += unrivalled([(s, c) for s, c in candidates if same_comment(s, c)
+                          and id(s) not in used and id(c) not in used])
+    if not chosen:
+        return actions
+
+    moves: dict[int, Action] = {}
+    gone: set[int] = set()
+    for stray, create in chosen:
+        wl, alloc = stray.worklogs[0], create.allocation
+        assert alloc is not None
+        note = f"from {wl.issue_key}"
+        if not same_comment(stray, create):
+            note += ", comment differs"
+        if not update_comments:
+            alloc.comment = wl.comment  # the comment is yours: it moves too
+        moves[id(create)] = Action(MOVE, create.issue_key, create.day,
+                                   allocation=alloc, worklogs=[wl], note=note)
+        gone.add(id(stray))
+    return [moves.get(id(a), a) for a in actions if id(a) not in gone]
+
+
 def build_plan(ctx: Context, export: Export, selection: Selection, *,
                unentered_only: bool, delete_extra: bool) -> Plan:
     allocations, skipped = map_allocations(export, ctx.settings)
@@ -966,16 +1110,24 @@ def build_plan(ctx: Context, export: Export, selection: Selection, *,
                              update_comments=ctx.settings.update_comments,
                              delete_extra=delete_extra)
 
+    # Your worklogs in the period on issues outside this run: reported, and
+    # the other half of any move. With --issue they're only wanted for moves,
+    # but they're looked for all the same, so a move can't become a copy.
+    known = set(keys) | {k for k in (_prefixed_key(row.ticket_id, ctx.settings)
+                                     for row, _ in skipped) if k}
+    everywhere = replace(selection, issues=frozenset())
+    for state in find_unexpected(ctx, everywhere, known):
+        states[state.key] = state
+        if state.error:
+            log.warning("%s: %s", state.key, state.error)
+        actions += [Action(UNEXPECTED, state.key, wl.day, worklogs=[wl])
+                    for wl in state.worklogs]
+    actions = pair_moves(actions, update_comments=ctx.settings.update_comments)
+    if selection.issues:
+        actions = [a for a in actions
+                   if a.kind != UNEXPECTED or a.issue_key in selection.issues]
+
     if not selection.issues:
-        # Issues whose tickets were deliberately skipped aren't unexpected.
-        known = set(keys) | {k for k in (_prefixed_key(row.ticket_id, ctx.settings)
-                                         for row, _ in skipped) if k}
-        for state in find_unexpected(ctx, selection, known):
-            states[state.key] = state
-            if state.error:
-                log.warning("%s: %s", state.key, state.error)
-            actions += [Action(UNEXPECTED, state.key, wl.day, worklogs=[wl])
-                        for wl in state.worklogs]
         for row, reason in skipped:
             if selection.wants_day(row.day):
                 actions.append(Action(SKIP, row.ticket_id, row.day, note=reason,
@@ -1012,6 +1164,10 @@ def describe_action(action: Action) -> str:
     wl = action.worklogs[0] if action.worklogs else None
     if action.kind == CREATE and alloc:
         text = f'{fmt_duration(alloc.seconds):<8} "{preview(alloc.comment)}"'
+    elif action.kind == MOVE and alloc and wl:
+        text = (f"{fmt_duration(alloc.seconds):<8} worklog {wl.id} {action.note}, "
+                f'"{preview(alloc.comment, 40)}"')
+        return text
     elif action.kind == UPDATE and alloc and wl:
         parts = []
         if "timeSpentSeconds" in action.changes:
@@ -1088,7 +1244,8 @@ def render_plan(plan: Plan, *, limit: int | None, show_comments: bool,
 
     lines.append(
         f"Summary: {plan.count(CREATE)} to create, {plan.count(UPDATE)} to update, "
-        f"{plan.count(DELETE)} to delete; {plan.count(OK)} in sync; "
+        f"{plan.count(MOVE)} to move, {plan.count(DELETE)} to delete; "
+        f"{plan.count(OK)} in sync; "
         f"{plan.count(CONFLICT)} conflicts, {plan.count(EXTRA)} extra, "
         f"{plan.count(UNEXPECTED)} unexpected; {plan.count(MISSING)} missing, "
         f"{plan.count(SKIP)} skipped"
@@ -1138,8 +1295,11 @@ class Journal:
         os.fsync(self._fh.fileno())
 
     def op(self, op: str, key: str, worklog_id: str, day: date, **detail: Any) -> None:
-        self.write({"type": "op", "op": op, "issue": key, "worklog_id": worklog_id,
-                    "day": day.isoformat(), **detail})
+        self.record(op, issue=key, worklog_id=worklog_id, day=day.isoformat(),
+                    **detail)
+
+    def record(self, op: str, **detail: Any) -> None:
+        self.write({"type": "op", "op": op, **detail})
 
     def close(self) -> None:
         self._fh.close()
@@ -1196,6 +1356,26 @@ def execute(ctx: Context, action: Action, journal: Journal) -> str:
         journal.op("create", key, worklog_id, day, after=_snapshot(created))
         return worklog_id
     wl = action.worklogs[0]
+    if action.kind == MOVE:
+        alloc = action.allocation
+        assert alloc is not None
+        # Create first, then delete: the time is never missing from Jira
+        body: dict[str, Any] = {"started": wl.started, "timeSpentSeconds": alloc.seconds,
+                                "comment": alloc.comment}
+        if wl.visibility:
+            body["visibility"] = wl.visibility
+        created = client.add_worklog(key, body, adjust)
+        worklog_id = str(created.get("id"))
+        journal.op("create", key, worklog_id, day, after=_snapshot(created))
+        try:
+            client.delete_worklog(wl.issue_key, wl.id, adjust)
+        except JiraError as exc:
+            raise JiraError(
+                f"made worklog {worklog_id} on {key}, but couldn't delete the old "
+                f"one ({wl.id} on {wl.issue_key}) - delete that by hand, or undo "
+                f"this run: {exc}", exc.status) from None
+        journal.op("delete", wl.issue_key, wl.id, wl.day, before=wl.snapshot())
+        return worklog_id
     if action.kind == UPDATE:
         updated = client.update_worklog(
             key, wl.id, _update_body(action.changes, wl.snapshot()), adjust)
@@ -1210,7 +1390,8 @@ def execute(ctx: Context, action: Action, journal: Journal) -> str:
 
 
 def describe_done(action: Action, worklog_id: str) -> str:
-    verb = {CREATE: "created", UPDATE: "updated", DELETE: "deleted"}[action.kind]
+    verb = {CREATE: "created", UPDATE: "updated", DELETE: "deleted",
+            MOVE: "moved"}[action.kind]
     return (f"{verb} worklog {worklog_id} on {action.issue_key} "
             f"{fmt_day(action.day)}  {describe_action(action)}")
 
@@ -1236,13 +1417,25 @@ def _signature(action: Action) -> tuple[Any, ...]:
 def changed_since_planned(ctx: Context, plan: Plan, selection: Selection,
                           todo: list[Action], delete_extra: bool) -> list[str]:
     """Issues whose worklogs moved on while the plan waited for a 'yes'."""
+    def expected(action: Action) -> tuple[Any, ...]:
+        # Re-checked one issue at a time, a move's new half is a create
+        if action.kind == MOVE:
+            return (CREATE, action.issue_key, action.day, (), ())
+        return _signature(action)
+
     stale: list[str] = []
     for key in sorted({a.issue_key for a in todo}, key=natural_key):
         state, now = _recheck(ctx, plan, selection, key, delete_extra)
         current = {_signature(a) for a in now}
-        if state.error or any(_signature(a) not in current
+        if state.error or any(expected(a) not in current
                               for a in todo if a.issue_key == key):
             stale.append(key)
+    for action in todo:
+        if action.kind == MOVE:
+            old = action.worklogs[0]
+            now_there = ctx.client.worklog(old.issue_key, old.id)
+            if now_there is None or not _same_content(now_there, old.snapshot()):
+                stale.append(old.issue_key)
     return stale
 
 
@@ -1266,8 +1459,14 @@ def verify_applied(ctx: Context, plan: Plan, selection: Selection,
                     problems.append(f"{where}: worklog {worklog_id} is still there")
             elif action.day in unsettled:
                 problems.append(f"{where}: Jira still differs from the timesheet")
-            elif action.kind == CREATE and worklog_id not in present:
+            elif action.kind in (CREATE, MOVE) and worklog_id not in present:
                 problems.append(f"{where}: new worklog {worklog_id} not found")
+    for action, _ in applied:
+        if action.kind == MOVE:
+            old = action.worklogs[0]
+            if ctx.client.worklog(old.issue_key, old.id) is not None:
+                problems.append(f"{old.issue_key} {fmt_day(old.day)}: moved worklog "
+                                f"{old.id} is still there")
     return problems
 
 
@@ -1277,6 +1476,703 @@ def confirm(question: str, assume_yes: bool) -> bool:
     if not sys.stdin.isatty():
         raise ConfigError("not running interactively - add --yes to go ahead")
     return input(f"{question} Type 'yes' to go ahead: ").strip().lower() == "yes"
+
+
+# --- Billing ----------------------------------------------------------------
+#
+# A bill export (Billing view, J) holds a finalised month's points per
+# deliverable and the tickets behind each. Each month someone else creates a
+# ticket per deliverable in the billing project, named by convention, e.g.
+# WB-WP2d-D1-October-2026. For the bill's month, every one of your tickets
+# gets the bill's story points (0 if its deliverable isn't on the bill, so
+# nothing unbilled is billable) and an "is delivered by" link to each work
+# ticket behind its points.
+
+BILL_SCHEMA = "timesheets.bill"
+BILL_VERSION = 1
+MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
+               "August", "September", "October", "November", "December")
+
+# Bill plan kinds. POINTS, LINK and CLOSE write to Jira; CLOSED marks a
+# closed ticket that's wrong, which only a person should reopen.
+POINTS = "points"
+LINK = "link"
+CLOSE = "close"
+LINKED = "linked"
+EXTRA_LINK = "extra-link"
+REVERSED = "reversed"
+CLOSED = "closed"
+BILL_WRITES = (POINTS, LINK, CLOSE)
+BILL_PROBLEMS = (MISSING, CLOSED)
+
+
+@dataclass
+class BillLine:
+    deliverable: str | None
+    title: str
+    points: int
+    tickets: list[tuple[str, str]]  # (timesheets ticket ID, description)
+
+
+@dataclass
+class BillExport:
+    path: Path
+    year: int                       # month the billing tickets are named for
+    month: int
+    billed: tuple[int, int]
+    generated_at: str
+    lines: list[BillLine]
+
+    @property
+    def points(self) -> int:
+        return sum(line.points for line in self.lines)
+
+    @property
+    def month_name(self) -> str:
+        return f"{MONTH_NAMES[self.month - 1]} {self.year}"
+
+
+def _parse_bill(path: Path, data: dict[str, Any]) -> BillExport:
+    if data.get("version") != BILL_VERSION:
+        raise ConfigError(f"{path} is bill export version {data.get('version')}; "
+                          f"sync_worklogs {__version__} reads version {BILL_VERSION}")
+    try:
+        billed = (int(data["billed"]["year"]), int(data["billed"]["month"]))
+        delivered = data.get("delivered")
+        # Named for the month the work was delivered, as the invoice is
+        named = ((int(delivered["year"]), int(delivered["month"]))
+                 if delivered else billed)
+        lines = [
+            BillLine(
+                deliverable=str(line["deliverable_id"]).strip()
+                if line.get("deliverable_id") else None,
+                title=str(line.get("deliverable_title") or ""),
+                points=int(line["points"]),
+                tickets=[(str(t["ticket_id"]).strip(), str(t.get("description") or ""))
+                         for t in line.get("tickets", [])],
+            )
+            for line in data["lines"]
+        ]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ConfigError(f"{path}: malformed bill export ({exc!r})") from None
+    return BillExport(path, named[0], named[1], billed,
+                      str(data.get("generated_at", "")), lines)
+
+
+def _summary_values(settings: Settings, year: int, month: int,
+                    deliverable: str = "") -> dict[str, str]:
+    name = MONTH_NAMES[month - 1]
+    return {"initials": settings.billing_initials, "deliverable": deliverable,
+            "month": name, "mon": name[:3], "mm": f"{month:02d}", "year": str(year)}
+
+
+def billing_summary(settings: Settings, deliverable: str, year: int, month: int) -> str:
+    """The summary your billing ticket for a deliverable and month should have."""
+    return settings.billing_summary.format(
+        **_summary_values(settings, year, month, deliverable))
+
+
+def billing_pattern(settings: Settings, year: int, month: int) -> re.Pattern[str]:
+    """Matches the month's billing summaries, capturing the deliverable."""
+    marker = "\x00"
+    before, _, after = billing_summary(settings, marker, year, month).partition(marker)
+    return re.compile(re.escape(before) + "(?P<deliverable>.+?)" + re.escape(after),
+                      re.IGNORECASE)
+
+
+def _jql_quote(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def billing_jql(settings: Settings, year: int, month: int) -> str:
+    """JQL for the candidates; billing_pattern then picks out the month's.
+
+    No text search: Jira indexes a hyphenated summary with digits in it,
+    like WB-WP5-D4-September-2026, as a single word, so searching for its
+    parts finds nothing. Paging through the project's tasks is slower but
+    can't miss.
+    """
+    if settings.billing_jql:
+        return settings.billing_jql.format(**_summary_values(settings, year, month))
+    clauses = [f"project = {_jql_quote(settings.billing_project)}"]
+    if settings.billing_issue_type:
+        clauses.append(f"issuetype = {_jql_quote(settings.billing_issue_type)}")
+    return " AND ".join(clauses) + " ORDER BY created DESC"
+
+
+def find_billing_tickets(ctx: Context, year: int, month: int
+                         ) -> dict[str, list[tuple[str, dict[str, Any]]]]:
+    """Your billing tickets for the month: deliverable -> [(as named, issue)].
+
+    Keyed by the deliverable in lower case; a list, because two tickets with
+    the same name is a mistake to report, not to guess around.
+    """
+    s = ctx.settings
+    fields = f"summary,status,issuetype,issuelinks,{s.points_field}"
+    found = ctx.client.search(billing_jql(s, year, month), fields=fields)
+    pattern = billing_pattern(s, year, month)
+    tickets: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for issue in found:
+        summary = str((issue.get("fields") or {}).get("summary") or "").strip()
+        match = pattern.fullmatch(summary)
+        if match:
+            named = match.group("deliverable")
+            tickets.setdefault(named.casefold(), []).append((named, issue))
+    return tickets
+
+
+@dataclass
+class LinkType:
+    name: str
+    billing_inward: bool  # billing ticket goes as inwardIssue to read right
+
+
+def find_link_type(client: JiraClient, description: str) -> LinkType:
+    """The link type with a side that reads description ("is delivered by")."""
+    want = description.casefold()
+    types = client.link_types()
+    for kind in types:
+        if str(kind.get("inward") or "").casefold() == want:
+            return LinkType(str(kind["name"]), True)
+        if str(kind.get("outward") or "").casefold() == want:
+            return LinkType(str(kind["name"]), False)
+    known = "; ".join(f"{k.get('name')} ({k.get('outward')} / {k.get('inward')})"
+                      for k in types)
+    raise ConfigError(f"no issue link type reads {description!r} - set "
+                      f"link_description in [billing]. Jira has: {known}")
+
+
+def read_links(issue: dict[str, Any], description: str
+               ) -> tuple[dict[str, str], dict[str, str]]:
+    """An issue's links as {other key: link id}, in two sets.
+
+    The first holds links that read "issue <description> other"; the second
+    those of the same type that read the other way round. From an issue's
+    side, a link listing an outwardIssue reads with the type's outward text
+    and one listing an inwardIssue with its inward text.
+    """
+    want = description.casefold()
+    forward: dict[str, str] = {}
+    backward: dict[str, str] = {}
+    for link in (issue.get("fields") or {}).get("issuelinks") or []:
+        kind = link.get("type") or {}
+        if "outwardIssue" in link:
+            other, reads, opposite = link["outwardIssue"], kind.get("outward"), kind.get("inward")
+        elif "inwardIssue" in link:
+            other, reads, opposite = link["inwardIssue"], kind.get("inward"), kind.get("outward")
+        else:
+            continue
+        key = str(other.get("key", "")).upper()
+        if str(reads or "").casefold() == want:
+            forward[key] = str(link.get("id"))
+        elif str(opposite or "").casefold() == want:
+            backward[key] = str(link.get("id"))
+    return forward, backward
+
+
+@dataclass
+class BillAction:
+    """One line of a bill plan: a ticket's points, or one of its links."""
+
+    kind: str
+    deliverable: str
+    issue: str | None = None          # the billing ticket
+    summary: str = ""
+    points_from: Any = None
+    points_to: int | None = None
+    work: str | None = None           # the work ticket a link is to
+    work_title: str = ""
+    note: str = ""
+    closing: bool = False             # part of the closing phase
+
+
+@dataclass
+class BillPlan:
+    bill: BillExport
+    actions: list[BillAction]
+    link_type: LinkType
+
+    def writes(self) -> list[BillAction]:
+        return [a for a in self.actions if a.kind in BILL_WRITES]
+
+    def count(self, kind: str) -> int:
+        return sum(1 for a in self.actions if a.kind == kind)
+
+
+def _same_points(current: Any, wanted: float) -> bool:
+    try:
+        return current is not None and float(current) == float(wanted)
+    except (TypeError, ValueError):
+        return False
+
+
+def fmt_points(value: Any) -> str:
+    if value is None:
+        return "empty"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return repr(value)
+    return f"{number:g}"
+
+
+def _is_done(fields: dict[str, Any]) -> bool:
+    status = fields.get("status") or {}
+    return (status.get("statusCategory") or {}).get("key") == "done"
+
+
+def close_transition(ctx: Context, key: str) -> tuple[dict[str, Any] | None, str]:
+    """The transition that closes the ticket and the body to send, or why not.
+
+    close_transition in [billing] names it; otherwise it's the one way to a
+    status in Jira's "done" category, preferring one to a status called
+    Closed if there are several.
+    """
+    s = ctx.settings
+    transitions = ctx.client.transitions(key)
+    names = ", ".join(repr(str(t.get("name"))) for t in transitions) or "none"
+    if s.close_transition:
+        chosen = [t for t in transitions
+                  if str(t.get("name", "")).casefold() == s.close_transition.casefold()]
+        if not chosen:
+            return None, f"no transition named {s.close_transition!r} from here ({names})"
+    else:
+        chosen = [t for t in transitions
+                  if ((t.get("to") or {}).get("statusCategory") or {}).get("key") == "done"]
+        if len(chosen) > 1:
+            chosen = [t for t in chosen if str((t.get("to") or {}).get("name", "")
+                                               ).casefold() == "closed"] or chosen
+        if len(chosen) != 1:
+            why = "no way to a done status" if not chosen else "several ways to close it"
+            return None, f"{why} from here ({names}) - set close_transition in [billing]"
+    transition = chosen[0]
+    body: dict[str, Any] = {"transition": {"id": str(transition.get("id"))}}
+    resolution = (transition.get("fields") or {}).get("resolution")
+    if resolution:
+        allowed = [str(v.get("name")) for v in resolution.get("allowedValues") or []]
+        if allowed and s.resolution.casefold() not in (a.casefold() for a in allowed):
+            return None, (f"resolution {s.resolution!r} isn't allowed here ("
+                          f"{', '.join(allowed)}) - set resolution in [billing]")
+        body["fields"] = {"resolution": {"name": s.resolution}}
+    transition["body"] = body
+    return transition, ""
+
+
+def build_bill_plan(ctx: Context, bill: BillExport, *, closing: bool = True) -> BillPlan:
+    """What would make your tickets for the bill's month match it.
+
+    Points and links come first, ticket by ticket; closing comes last, so
+    that apply can check each ticket before closing it.
+    """
+    s = ctx.settings
+    if not s.billing_initials:
+        raise ConfigError("set initials in [billing] - they pick out your tickets")
+    link_type = find_link_type(ctx.client, s.link_description)
+    found = find_billing_tickets(ctx, bill.year, bill.month)
+
+    known: dict[str, bool] = {}
+
+    def work_exists(key: str) -> bool:
+        if key not in known:
+            try:
+                issue = ctx.client.issue(key, fields="summary")
+            except JiraError as exc:
+                if exc.status is None:
+                    raise
+                issue = None
+            known[key] = bool(issue) and str(issue.get("key", key)).upper() == key
+        return known[key]
+
+    closes: list[BillAction] = []
+
+    def ticket_actions(deliverable: str, issue: dict[str, Any], points: int,
+                       tickets: list[tuple[str, str]], note: str) -> list[BillAction]:
+        key = str(issue["key"])
+        fields = issue.get("fields") or {}
+        summary = str(fields.get("summary") or "")
+        current = fields.get(s.points_field)
+        status = str((fields.get("status") or {}).get("name") or "?")
+        done = _is_done(fields)
+        if _same_points(current, points):
+            actions = [BillAction(OK, deliverable, key, summary, current, points, note=note)]
+        elif done:
+            actions = [BillAction(CLOSED, deliverable, key, summary, current, points,
+                                  note=f"{status}, but its story points are "
+                                       f"{fmt_points(current)}, not {points} - "
+                                       "reopen it by hand, then re-run")]
+        else:
+            actions = [BillAction(POINTS, deliverable, key, summary, current, points,
+                                  note=note)]
+        if not done and closing:
+            transition, problem = close_transition(ctx, key)
+            if transition is None:
+                closes.append(BillAction(MISSING, deliverable, key, summary,
+                                         note=f"can't close it: {problem}",
+                                         closing=True))
+            else:
+                target = (transition.get("to") or {}).get("name", "?")
+                closes.append(BillAction(CLOSE, deliverable, key, summary,
+                                         note=f"{status} -> {target} via "
+                                              f"{transition.get('name')!r}",
+                                         closing=True))
+        forward, backward = read_links(issue, s.link_description)
+        wanted: set[str] = set()
+        for ticket_id, title in tickets:
+            work = issue_key_for(ticket_id, s)
+            base: dict[str, Any] = {"deliverable": deliverable, "issue": key,
+                                    "summary": summary, "work_title": title}
+            if work is None:
+                actions.append(BillAction(MISSING, work=ticket_id, note="not a Jira key "
+                                          "- map it in [issue_map]", **base))
+                continue
+            if work in wanted:
+                continue
+            wanted.add(work)
+            if work in forward:
+                actions.append(BillAction(LINKED, work=work, **base))
+            elif work in backward:
+                actions.append(BillAction(REVERSED, work=work, note="linked the "
+                                          "wrong way round - fix it by hand", **base))
+            elif not work_exists(work):
+                actions.append(BillAction(MISSING, work=work, note="work ticket not "
+                                          "found, or not visible to you", **base))
+            elif done:
+                actions.append(BillAction(CLOSED, work=work, note=f"{status}, but not "
+                                          "linked to this - reopen it by hand, then "
+                                          "re-run", **base))
+            else:
+                actions.append(BillAction(LINK, work=work, **base))
+        actions += [BillAction(EXTRA_LINK, deliverable, key, summary, work=other,
+                               note="not on this bill line, left alone")
+                    for other in sorted(set(forward) - wanted, key=natural_key)]
+        return actions
+
+    actions: list[BillAction] = []
+    on_bill: set[str] = set()
+    for line in bill.lines:
+        if not line.deliverable:
+            actions.append(BillAction(
+                MISSING, "(none)", points_to=line.points,
+                note=f"{len(line.tickets)} ticket(s) have no deliverable, so no "
+                     "ticket to bill them on - fix in timesheets and re-finalise"))
+            continue
+        on_bill.add(line.deliverable.casefold())
+        expected = billing_summary(s, line.deliverable, bill.year, bill.month)
+        matches = found.get(line.deliverable.casefold(), [])
+        if len(matches) != 1:
+            problem = (f"no {s.billing_project} ticket named {expected}" if not matches
+                       else f"{len(matches)} tickets named {expected} ("
+                            + ", ".join(str(i["key"]) for _, i in matches)
+                            + ") - can't tell which to bill")
+            actions.append(BillAction(MISSING, line.deliverable, summary=expected,
+                                      points_to=line.points, note=problem))
+            continue
+        actions += ticket_actions(line.deliverable, matches[0][1], line.points,
+                                  line.tickets, "")
+
+    for folded, matches in sorted(found.items()):
+        if folded in on_bill:
+            continue
+        for named, issue in matches:
+            actions += ticket_actions(named, issue, 0, [], "not on this bill")
+    return BillPlan(bill, actions + closes, link_type)
+
+
+def describe_bill_action(action: BillAction, description: str) -> str:
+    note = f"  ({action.note})" if action.note else ""
+    if action.closing:
+        return f"{action.issue}  {action.summary}  ({action.note})"
+    if action.kind == POINTS:
+        return (f"story points {fmt_points(action.points_from)} -> "
+                f"{fmt_points(action.points_to)}{note}")
+    if action.kind == OK:
+        return f"story points {fmt_points(action.points_to)}{note}"
+    if action.kind in (LINK, LINKED):
+        return f"{description} {action.work}  {preview(action.work_title, 44)}".rstrip()
+    if action.kind == EXTRA_LINK:
+        return f"{description} {action.work}{note}"
+    if action.kind == REVERSED:
+        return f"{action.work}: {action.note}"
+    if action.kind == CLOSED and not action.work:
+        return action.note
+    if action.work:
+        return f"{action.work}: {action.note}"
+    return action.note + (f"  ({fmt_points(action.points_to)} points)"
+                          if action.points_to is not None else "")
+
+
+def render_bill_plan(plan: BillPlan, description: str, *, limit: int | None,
+                     changes_only: bool) -> list[str]:
+    lines: list[str] = []
+    groups: dict[str, list[BillAction]] = {}
+    for action in plan.actions:
+        group = "\x00closing" if action.closing else action.issue or action.deliverable
+        groups.setdefault(group, []).append(action)
+    number = 0
+    for group, actions in groups.items():
+        if changes_only and all(a.kind in (OK, LINKED) for a in actions):
+            continue
+        first = actions[0]
+        if group == "\x00closing":
+            lines.append("Then closing, for each ticket that checks out:")
+        elif first.issue:
+            lines.append(f"{first.issue}  {first.summary}")
+        else:
+            lines.append(f"{first.deliverable}  {first.summary}".rstrip())
+        for action in actions:
+            if changes_only and action.kind in (OK, LINKED):
+                continue
+            label = suffix = ""
+            if action.kind in BILL_WRITES:
+                number += 1
+                label = f"[{number}]"
+                if limit is not None and number > limit:
+                    suffix = "  (beyond --limit)"
+            lines.append(f"  {label:>5} {action.kind:<10} "
+                         f"{describe_bill_action(action, description)}{suffix}")
+        lines.append("")
+    lines.append(
+        f"Summary: {plan.count(POINTS)} story points to set, {plan.count(LINK)} "
+        f"links to add, {plan.count(CLOSE)} to close; {plan.count(OK)} points and "
+        f"{plan.count(LINKED)} links already right; {plan.count(REVERSED)} reversed, "
+        f"{plan.count(EXTRA_LINK)} extra links; {plan.count(MISSING)} missing, "
+        f"{plan.count(CLOSED)} closed but wrong"
+    )
+    return lines
+
+
+def print_bill_header(ctx: Context, bill: BillExport, plan_link: LinkType | None) -> None:
+    s = ctx.settings
+    billed = f"{bill.billed[0]}-{bill.billed[1]:02d}"
+    tickets = sum(len(line.tickets) for line in bill.lines)
+    print(f"Bill:     {bill.path.name}  (billed {billed}; {len(bill.lines)} "
+          f"deliverable(s), {bill.points} points, {tickets} ticket(s); generated "
+          f"{bill.generated_at})")
+    print(f"Jira:     {s.url} as {ctx.me.get('displayName')} ({ctx.me.get('name')})")
+    example = billing_summary(s, "<deliverable>", bill.year, bill.month)
+    print(f"Billing:  {s.billing_project} tickets named {example}; points in "
+          f"{s.points_field}; links read {s.link_description!r}"
+          + (f" (type {plan_link.name})" if plan_link else ""))
+    print(f"Tool:     sync_worklogs {__version__}")
+    print()
+
+
+class LinkMaker:
+    """Creates "<billing ticket> is delivered by <work ticket>" links.
+
+    Jira 8 can create a link the other way round from how the REST docs
+    describe it (when a link type's name matches its outward text), so every
+    new link is read back. If it came out reversed, it's removed and made
+    again the other way, and later links are made that way from the start.
+    """
+
+    def __init__(self, ctx: Context, link_type: LinkType) -> None:
+        self.ctx = ctx
+        self.link_type = link_type
+        self.flipped = False
+
+    def create(self, issue_key: str, work_key: str) -> str:
+        client = self.ctx.client
+        description = self.ctx.settings.link_description
+        for attempt in (1, 2):
+            billing_inward = self.link_type.billing_inward != self.flipped
+            inward, outward = ((issue_key, work_key) if billing_inward
+                               else (work_key, issue_key))
+            client.create_link(self.link_type.name, inward, outward)
+            issue = client.issue(issue_key, fields="issuelinks") or {}
+            forward, backward = read_links(issue, description)
+            if work_key in forward:
+                return forward[work_key]
+            if work_key in backward and attempt == 1:
+                client.delete_link(backward[work_key])
+                self.flipped = not self.flipped
+                log.warning("Jira made the %s link the other way round; removed "
+                            "it and making links the other way from now on",
+                            self.link_type.name)
+                continue
+            break
+        raise JiraError(f"linked {issue_key} and {work_key}, but no link reading "
+                        f"{description!r} can be found afterwards", status=200)
+
+
+def execute_bill(ctx: Context, action: BillAction, journal: Journal,
+                 links: LinkMaker) -> str:
+    """Make one planned bill change in Jira and journal it."""
+    assert action.issue is not None
+    if action.kind == POINTS:
+        assert action.points_to is not None
+        value = float(action.points_to)
+        ctx.client.set_field(action.issue, ctx.settings.points_field, value)
+        journal.record("points", issue=action.issue, field=ctx.settings.points_field,
+                       before=action.points_from, after=value)
+        return action.issue
+    if action.kind == LINK:
+        assert action.work is not None
+        link_id = links.create(action.issue, action.work)
+        journal.record("link", issue=action.issue, other=action.work, link_id=link_id)
+        return link_id
+    if action.kind == CLOSE:
+        return close_ticket(ctx, action.issue, journal)
+    raise ValueError(f"not a write: {action.kind}")
+
+
+def _status_name(ctx: Context, key: str) -> str:
+    issue = ctx.client.issue(key, fields="status") or {}
+    return str(((issue.get("fields") or {}).get("status") or {}).get("name") or "")
+
+
+def close_ticket(ctx: Context, key: str, journal: Journal) -> str:
+    before = _status_name(ctx, key)
+    transition, problem = close_transition(ctx, key)
+    if transition is None:
+        raise JiraError(f"can't close {key}: {problem}", status=200)
+    ctx.client.transition(key, transition["body"])
+    journal.record("close", issue=key, status_before=before)
+    return key
+
+
+def _bill_signature(action: BillAction) -> tuple[Any, ...]:
+    return (action.kind, action.issue, action.work, fmt_points(action.points_from),
+            action.points_to)
+
+
+def verify_bill_applied(ctx: Context, bill: BillExport,
+                        applied: list[BillAction]) -> list[str]:
+    """Re-read the month's billing tickets; return what still disagrees."""
+    after = build_bill_plan(ctx, bill)
+    settled_points = {(a.issue, a.points_to) for a in after.actions if a.kind == OK}
+    settled_links = {(a.issue, a.work) for a in after.actions if a.kind == LINKED}
+    still_open = {a.issue for a in after.actions if a.closing}
+    problems: list[str] = []
+    for action in applied:
+        if action.kind == CLOSE and action.issue in still_open:
+            problems.append(f"{action.issue}: not closed")
+        if action.kind == POINTS and (action.issue, action.points_to) not in settled_points:
+            problems.append(f"{action.issue}: story points aren't "
+                            f"{fmt_points(action.points_to)}")
+        if action.kind == LINK and (action.issue, action.work) not in settled_links:
+            problems.append(f"{action.issue}: no {ctx.settings.link_description!r} "
+                            f"link to {action.work}")
+    return problems
+
+
+def _show_bill_step(action: BillAction, index: int, total: int, plan: BillPlan,
+                    description: str) -> None:
+    print()
+    print(f"[{index}/{total}] {action.kind.upper()}  {action.issue}  {action.summary}")
+    if action.kind == POINTS:
+        line = next((bl for bl in plan.bill.lines if bl.deliverable
+                     and bl.deliverable.casefold() == action.deliverable.casefold()),
+                    None)
+        print(f"      story points {fmt_points(action.points_from)} -> "
+              f"{fmt_points(action.points_to)}"
+              + (f"  ({line.title})" if line else f"  ({action.note})"))
+    elif action.kind == CLOSE:
+        print(f"      close it: {action.note}")
+    else:
+        print(f"      {action.issue} {description} {action.work}")
+        if action.work_title:
+            print(f"      {action.work}: {action.work_title}")
+    print()
+
+
+def bill_apply(args: argparse.Namespace, ctx: Context, bill: BillExport) -> int:
+    description = ctx.settings.link_description
+    closing = not args.no_close
+    plan = build_bill_plan(ctx, bill, closing=closing)
+    print_bill_header(ctx, bill, plan.link_type)
+    print("\n".join(render_bill_plan(plan, description, limit=args.limit,
+                                     changes_only=args.changes_only)))
+    print()
+
+    problems = sum(plan.count(k) for k in BILL_PROBLEMS)
+    if problems and not args.skip_missing:
+        print(f"Stopped: {problems} problem(s) marked missing or closed above. Fix "
+              "them, or add --skip-missing to do the rest.")
+        return EXIT_JIRA
+    todo = plan.writes()[:args.limit] if args.limit else plan.writes()
+    if not todo:
+        print("Nothing to change.")
+        return EXIT_OK
+
+    review = args.review or ctx.settings.review
+    if review != "none":
+        if not sys.stdin.isatty():
+            raise ConfigError("--step needs an interactive terminal")
+        todo = walk_changes(todo, lambda a, i, n: _show_bill_step(a, i, n, plan,
+                                                                  description))
+        if not todo:
+            print("Everything was left out, so nothing was changed.")
+            return EXIT_OK
+
+    if not confirm(f"Make {len(todo)} change(s) in {ctx.settings.url} as "
+                   f"{ctx.me.get('name')}?", args.yes):
+        print("Nothing changed.")
+        return EXIT_OK
+    if not args.yes or review != "none":
+        fresh = {_bill_signature(a)
+                 for a in build_bill_plan(ctx, bill, closing=closing).writes()}
+        stale = sorted({str(a.issue) for a in todo if _bill_signature(a) not in fresh})
+        if stale:
+            print(f"Stopped: Jira changed on {', '.join(stale)} while waiting. "
+                  "Nothing was changed; run apply again for a fresh plan.")
+            return EXIT_DIFFERENCES
+
+    journal = Journal(ctx.settings.journal_dir, "apply", {
+        "url": ctx.settings.url, "user": ctx.me.get("name"),
+        "export": str(bill.path), "scope": f"bill for {bill.month_name}",
+    })
+    links = LinkMaker(ctx, plan.link_type)
+    applied: list[BillAction] = []
+    held: list[BillAction] = []
+    failed = False
+
+    def run(actions: list[BillAction]) -> bool:
+        for action in actions:
+            try:
+                execute_bill(ctx, action, journal, links)
+            except JiraError as exc:
+                print(f"FAILED on {action.issue} ({action.kind}): {exc}")
+                print("Stopping here; nothing after this was attempted.")
+                return False
+            applied.append(action)
+            print(f"  {action.issue}: {describe_bill_action(action, description)}")
+        return True
+
+    try:
+        failed = not run([a for a in todo if a.kind != CLOSE])
+        closes = [a for a in todo if a.kind == CLOSE]
+        if closes and not failed:
+            # Closing is what gets a ticket paid: re-read Jira first, and only
+            # close tickets that now match the bill exactly.
+            check = build_bill_plan(ctx, bill, closing=False)
+            unsettled = {a.issue for a in check.actions if a.issue and a.kind in
+                         (POINTS, LINK, REVERSED, *BILL_PROBLEMS)}
+            held = [a for a in closes if a.issue in unsettled]
+            for action in held:
+                print(f"  {action.issue}: left open - it doesn't match the bill yet")
+            failed = not run([a for a in closes if a.issue not in unsettled])
+    finally:
+        journal.close()
+
+    print(f"\n{len(applied)} change(s) made. Journal: {journal.path}")
+    if applied:
+        print(f"  (to reverse them: {Path(sys.argv[0]).name} undo {journal.path})")
+    print("Verifying against Jira...")
+    problems = verify_bill_applied(ctx, bill, applied)
+    for problem in problems:
+        print(f"  !! {problem}")
+    if problems:
+        print(f"Verification FAILED for {len(problems)} change(s).")
+        return EXIT_DIFFERENCES
+    print(f"Verified: all {len(applied)} change(s) are in Jira as planned.")
+    left = len(plan.writes()) - len(applied)
+    if left and not failed:
+        print(f"{left} further change(s) not made this run.")
+    if failed:
+        return EXIT_JIRA
+    return EXIT_DIFFERENCES if held else EXIT_OK
+
 
 
 # --- Editing comments -------------------------------------------------------
@@ -1298,7 +2194,7 @@ EDIT_INSTRUCTIONS = """\
 def _editable(todo: list[Action]) -> list[tuple[int, Action]]:
     """The run's writes that send a comment, with their plan numbers."""
     return [(n, a) for n, a in enumerate(todo, 1)
-            if a.allocation and (a.kind == CREATE or "comment" in a.changes)]
+            if a.allocation and (a.kind in (CREATE, MOVE) or "comment" in a.changes)]
 
 
 def edit_file_text(editable: list[tuple[int, Action]],
@@ -1440,12 +2336,62 @@ def edit_comments(ctx: Context, plan: Plan, todo: list[Action],
     return keep
 
 
-STEP_HELP = """\
-    y  send this change as shown
-    e  edit the comment in your editor, then decide
-    s  skip it this run (a later apply offers it again)
-    a  send this one and all the rest without asking
-    q  stop reviewing; the rest are skipped this run"""
+STEP_HELP = (
+    ("y", "send this change as shown"),
+    ("e", "edit the comment in your editor, then decide"),
+    ("s", "skip it this run (a later apply offers it again)"),
+    ("a", "send this one and all the rest without asking"),
+    ("q", "stop reviewing; the rest are skipped this run"),
+)
+
+
+def walk_changes(todo: list[Any], show: Callable[[Any, int, int], None],
+                 edit: Callable[[Any, int], bool] | None = None,
+                 can_edit: Callable[[Any], bool] = lambda _change: False,
+                 ) -> list[Any]:
+    """Ask about each change in turn; returns the ones to send.
+
+    ``show`` prints a change; ``edit`` (offered where ``can_edit`` says so)
+    returns True if it changed something worth showing again.
+    """
+    keep: list[Any] = []
+    skipped = 0
+    send_rest = stop = False
+    for index, change in enumerate(todo, 1):
+        if send_rest:
+            keep.append(change)
+            continue
+        editable = edit is not None and can_edit(change)
+        choices = "[y]es  " + ("[e]dit  " if editable else "") + \
+            "[s]kip  [a]ll the rest  [q]uit  [?]"
+        show(change, index, len(todo))
+        while True:
+            answer = input(f"  {choices} ").strip().lower()[:1]
+            if answer == "y":
+                keep.append(change)
+            elif answer == "a":
+                keep.append(change)
+                send_rest = True
+            elif answer == "s":
+                skipped += 1
+            elif answer == "q":
+                stop = True
+            elif answer == "e" and edit is not None and editable:
+                if edit(change, index):
+                    show(change, index, len(todo))
+                continue
+            else:
+                print("\n".join(f"    {key}  {text}" for key, text in STEP_HELP
+                                if key != "e" or editable))
+                continue
+            break
+        if stop:
+            break
+
+    unreviewed = len(todo) - len(keep) - skipped
+    print(f"\nReviewed: {len(keep)} to send, {skipped} skipped"
+          + (f", {unreviewed} not reviewed" if unreviewed else ""))
+    return keep
 
 
 def _wrapped(text: str, indent: str = "      ") -> list[str]:
@@ -1461,6 +2407,8 @@ def _show_step(action: Action, index: int, total: int, plan: Plan) -> None:
     wl = action.worklogs[0] if action.worklogs else None
     if action.kind == CREATE and alloc:
         what = fmt_duration(alloc.seconds)
+    elif action.kind == MOVE and alloc and wl:
+        what = f"{fmt_duration(alloc.seconds)}, worklog {wl.id} {action.note}"
     elif action.kind == UPDATE and alloc and wl:
         what = f"worklog {wl.id}, " + (
             f"{fmt_duration(wl.seconds)} -> {fmt_duration(alloc.seconds)}"
@@ -1481,7 +2429,10 @@ def _show_step(action: Action, index: int, total: int, plan: Plan) -> None:
     if action.note:
         print(f"      ({action.note})")
     print()
-    if action.kind == CREATE and alloc:
+    if action.kind == MOVE and wl:
+        print(f"    Creates it on {action.issue_key}, then deletes worklog {wl.id} "
+              f"from {wl.issue_key}.")
+    if action.kind in (CREATE, MOVE) and alloc:
         print("    Comment:")
         print("\n".join(_wrapped(alloc.comment)))
     elif action.kind == UPDATE and alloc and wl and "comment" in action.changes:
@@ -1537,49 +2488,22 @@ def step_review(ctx: Context, plan: Plan, todo: list[Action],
             rewritten.append((index, action))
 
     edits_path = ctx.settings.journal_dir / f"edit-{datetime.now():%Y%m%d-%H%M%S}.txt"
-    keep: list[Action] = []
-    skipped = 0
-    send_rest = stop = False
-    for index, action in enumerate(todo, 1):
-        if send_rest:
-            keep.append(action)
-            continue
-        editable = id(action) in editable_ids
-        choices = "[y]es  " + ("[e]dit  " if editable else "") + \
-            "[s]kip  [a]ll the rest  [q]uit  [?]"
-        _show_step(action, index, len(todo), plan)
-        while True:
-            answer = input(f"  {choices} ").strip().lower()[:1]
-            if answer == "y":
-                keep.append(action)
-            elif answer == "a":
-                keep.append(action)
-                send_rest = True
-            elif answer == "s":
-                skipped += 1
-            elif answer == "q":
-                stop = True
-            elif answer == "e" and editable:
-                assert action.allocation is not None
-                comment = _edit_one(ctx, action.allocation.comment)
-                if comment is not None:
-                    _set_comment(action, comment)
-                    if all(a is not action for _, a in rewritten):
-                        rewritten.append((index, action))
-                    edits_path.write_text(edit_file_text(rewritten, {}),
-                                          encoding="utf-8")
-                    _show_step(action, index, len(todo), plan)
-                continue
-            else:
-                print(STEP_HELP)
-                continue
-            break
-        if stop:
-            break
 
-    unreviewed = len(todo) - len(keep) - skipped
-    print(f"\nReviewed: {len(keep)} to send, {skipped} skipped"
-          + (f", {unreviewed} not reviewed" if unreviewed else ""))
+    def edit(action: Action, index: int) -> bool:
+        assert action.allocation is not None
+        comment = _edit_one(ctx, action.allocation.comment)
+        if comment is None:
+            return False
+        _set_comment(action, comment)
+        if all(a is not action for _, a in rewritten):
+            rewritten.append((index, action))
+        edits_path.write_text(edit_file_text(rewritten, {}), encoding="utf-8")
+        return True
+
+    keep = walk_changes(
+        todo, lambda action, index, total: _show_step(action, index, total, plan),
+        edit, lambda action: id(action) in editable_ids,
+    )
     if edits_path.exists():
         print(f"Edited comments saved in {edits_path}")
         print(f"  (a later apply can start from them with: --edits {edits_path})")
@@ -1619,8 +2543,54 @@ def make_selection(args: argparse.Namespace, export: Export,
     return Selection(first, last, frozenset(issues), frozenset(args.date))
 
 
-def _prepare(args: argparse.Namespace) -> tuple[Context, Export, Selection, Plan]:
-    export = load_export(Path(args.export).expanduser())
+# Options that only make sense for worklogs, by argparse dest
+WORKLOG_ONLY = (("issue", "--issue"), ("date", "--date"), ("date_from", "--from"),
+                ("date_to", "--to"), ("unentered_only", "--unentered-only"),
+                ("delete_extra", "--delete-extra"), ("show_comments", "--show-comments"),
+                ("edits", "--edits"))
+
+
+def load_for_command(args: argparse.Namespace) -> Export | BillExport:
+    """The command's export, with options checked against its kind."""
+    export = read_export(Path(args.export).expanduser())
+    if isinstance(export, BillExport):
+        used = [flag for dest, flag in WORKLOG_ONLY if getattr(args, dest, None)]
+        if used:
+            raise ConfigError(f"{', '.join(used)} only apply to worklogs, not to "
+                              "a bill export")
+        if getattr(args, "review", None) == "editor":
+            raise ConfigError("a bill has no comments to edit; --step reviews it")
+        if args.month:
+            export.year, export.month = args.month
+    elif args.month or args.no_close:
+        raise ConfigError("--month and --no-close only apply to a bill export")
+    return export
+
+
+def bill_report(args: argparse.Namespace, bill: BillExport, *, verify: bool) -> int:
+    """plan or verify for a bill export."""
+    ctx = connect(args)
+    plan = build_bill_plan(ctx, bill, closing=not args.no_close)
+    print_bill_header(ctx, bill, plan.link_type)
+    print("\n".join(render_bill_plan(plan, ctx.settings.link_description,
+                                     limit=None if verify else args.limit,
+                                     changes_only=args.changes_only)))
+    if verify:
+        differences = sum(plan.count(k) for k in (*BILL_WRITES, REVERSED, *BILL_PROBLEMS))
+        if differences:
+            print(f"NOT IN SYNC: {differences} difference(s) between Jira and the bill.")
+            return EXIT_DIFFERENCES
+        print(f"IN SYNC: your {bill.month_name} billing tickets match the bill.")
+        return EXIT_OK
+    writes = len(plan.writes())
+    if writes:
+        print(f"Nothing has been changed. apply with the same options would make "
+              f"{min(writes, args.limit or writes)} change(s).")
+    return EXIT_OK
+
+
+def _prepare(args: argparse.Namespace, export: Export
+             ) -> tuple[Context, Export, Selection, Plan]:
     ctx = connect(args)
     selection = make_selection(args, export, ctx.settings)
     print_header(ctx, export, selection)
@@ -1660,6 +2630,23 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"Writes:     adjustEstimate={settings.adjust_estimate}, comments "
           f"{comments}, new worklogs from {settings.day_start:%H:%M}")
     print(f"Journals:   {settings.journal_dir}")
+    if settings.billing_initials:
+        today = date.today()
+        example = billing_summary(settings, "WP2d-D1", today.year, today.month)
+        try:
+            names = {str(f.get("id")): str(f.get("name")) for f in client.fields()}
+            field = names.get(settings.points_field, "NOT FOUND in Jira")
+        except JiraError as exc:
+            field = f"couldn't check: {str(exc).splitlines()[0]}"
+        try:
+            link = f"type {find_link_type(client, settings.link_description).name}"
+        except (JiraError, ConfigError) as exc:
+            link = str(exc).splitlines()[0]
+        print(f"Billing:    {settings.billing_project} tickets named like {example}")
+        print(f"            points in {settings.points_field} ({field}); links "
+              f"read {settings.link_description!r} ({link})")
+    else:
+        print("Billing:    not set up (no initials in [billing])")
     print(f"Tool:       sync_worklogs {__version__}, Python "
           f"{platform.python_version()}, requests {getattr(requests, '__version__', '?')}")
 
@@ -1686,7 +2673,10 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    _, _, _, plan = _prepare(args)
+    export = load_for_command(args)
+    if isinstance(export, BillExport):
+        return bill_report(args, export, verify=False)
+    _, _, _, plan = _prepare(args, export)
     print("\n".join(render_plan(plan, limit=args.limit,
                                 show_comments=args.show_comments,
                                 changes_only=args.changes_only)))
@@ -1698,7 +2688,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    _, _, _, plan = _prepare(args)
+    export = load_for_command(args)
+    if isinstance(export, BillExport):
+        return bill_report(args, export, verify=True)
+    _, _, _, plan = _prepare(args, export)
     print("\n".join(render_plan(plan, limit=None,
                                 show_comments=args.show_comments,
                                 changes_only=args.changes_only)))
@@ -1712,7 +2705,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
-    ctx, export, selection, plan = _prepare(args)
+    loaded = load_for_command(args)
+    if isinstance(loaded, BillExport):
+        return bill_apply(args, connect(args), loaded)
+    ctx, export, selection, plan = _prepare(args, loaded)
     print("\n".join(render_plan(plan, limit=args.limit,
                                 show_comments=args.show_comments,
                                 changes_only=args.changes_only)))
@@ -1834,6 +2830,148 @@ def _find_twin(ctx: Context, key: str, snapshot: dict[str, Any]) -> str | None:
     return None
 
 
+@dataclass
+class UndoStep:
+    """What undo will do about one journalled change; run None means nothing."""
+
+    label: str
+    run: Callable[[Journal], str] | None = None
+
+
+def _undo_worklog(ctx: Context, op: dict[str, Any], force: bool) -> UndoStep:
+    key, worklog_id = op["issue"], str(op["worklog_id"])
+    where = f"{key} {op['day']} worklog {worklog_id}"
+    day = date.fromisoformat(op["day"])
+    adjust = ctx.settings.adjust_estimate
+    if op["op"] == "delete":
+        twin = _find_twin(ctx, key, op["before"])
+        if twin:
+            return UndoStep(f"  -         {where}: already back as worklog {twin}")
+
+        def recreate(journal: Journal) -> str:
+            created = ctx.client.add_worklog(key, dict(op["before"]), adjust)
+            new_id = str(created.get("id"))
+            journal.op("create", key, new_id, day, after=_snapshot(created))
+            return f"recreated worklog on {key} as {new_id}"
+        return UndoStep(f"  recreate  {where}  "
+                        f"({fmt_duration(op['before']['timeSpentSeconds'])})", recreate)
+
+    current = ctx.client.worklog(key, worklog_id)
+    if current is None:
+        return UndoStep(f"  -         {where}: already gone, nothing to undo")
+    if not force and not _same_content(current, op["after"]):
+        return UndoStep(f"  -         {where}: edited since, leaving it "
+                        "(--force to undo anyway)")
+    if op["op"] == "create":
+        def delete(journal: Journal) -> str:
+            ctx.client.delete_worklog(key, worklog_id, adjust)
+            journal.op("delete", key, worklog_id, day, before=_snapshot(current))
+            return f"deleted worklog {worklog_id} on {key}"
+        return UndoStep(f"  delete    {where}  "
+                        f"({fmt_duration(current.get('timeSpentSeconds') or 0)})", delete)
+
+    def restore(journal: Journal) -> str:
+        body = _update_body({f: op["before"][f] for f in op["changed"]}, op["before"])
+        updated = ctx.client.update_worklog(key, worklog_id, body, adjust)
+        journal.op("update", key, worklog_id, day, changed=op["changed"],
+                   before=_snapshot(current), after=_snapshot(updated))
+        return f"restored worklog {worklog_id} on {key}"
+    return UndoStep(f"  restore   {where}  ({', '.join(op['changed'])})", restore)
+
+
+def _undo_points(ctx: Context, op: dict[str, Any], force: bool) -> UndoStep:
+    key, field_id = op["issue"], op["field"]
+    issue = ctx.client.issue(key, fields=field_id)
+    if issue is None:
+        return UndoStep(f"  -         {key}: not found, nothing to undo")
+    current = (issue.get("fields") or {}).get(field_id)
+    if not force and fmt_points(current) != fmt_points(op["after"]):
+        return UndoStep(f"  -         {key}: story points changed since "
+                        f"({fmt_points(current)}), leaving them (--force to undo anyway)")
+
+    def restore(journal: Journal) -> str:
+        ctx.client.set_field(key, field_id, op["before"])
+        journal.record("points", issue=key, field=field_id, before=current,
+                       after=op["before"])
+        return f"story points on {key} back to {fmt_points(op['before'])}"
+    return UndoStep(f"  points    {key}: {fmt_points(current)} -> "
+                    f"{fmt_points(op['before'])}", restore)
+
+
+def _undo_link(ctx: Context, op: dict[str, Any]) -> UndoStep:
+    key, other = op["issue"], op["other"]
+    description = ctx.settings.link_description
+    if op["op"] == "link":
+        link_id = str(op["link_id"])
+        if ctx.client.link(link_id) is None:
+            return UndoStep(f"  -         {key} -> {other}: link already gone")
+
+        def unlink(journal: Journal) -> str:
+            ctx.client.delete_link(link_id)
+            journal.record("unlink", issue=key, other=other, link_id=link_id)
+            return f"removed the link from {key} to {other}"
+        return UndoStep(f"  unlink    {key} {description} {other}", unlink)
+
+    issue = ctx.client.issue(key, fields="issuelinks") or {}
+    if other in read_links(issue, description)[0]:
+        return UndoStep(f"  -         {key} -> {other}: already linked again")
+
+    def relink(journal: Journal) -> str:
+        link_type = find_link_type(ctx.client, description)
+        link_id = LinkMaker(ctx, link_type).create(key, other)
+        journal.record("link", issue=key, other=other, link_id=link_id)
+        return f"linked {key} to {other} again"
+    return UndoStep(f"  relink    {key} {description} {other}", relink)
+
+
+def _undo_close(ctx: Context, op: dict[str, Any]) -> UndoStep:
+    key = op["issue"]
+    issue = ctx.client.issue(key, fields="status")
+    if issue is None:
+        return UndoStep(f"  -         {key}: not found, nothing to undo")
+    fields = issue.get("fields") or {}
+    status = str((fields.get("status") or {}).get("name") or "")
+    if op["op"] == "reopen":
+        if _is_done(fields):
+            return UndoStep(f"  -         {key}: already closed ({status})")
+
+        def close(journal: Journal) -> str:
+            close_ticket(ctx, key, journal)
+            return f"closed {key} again"
+        return UndoStep(f"  close     {key}  ({status})", close)
+
+    if not _is_done(fields):
+        return UndoStep(f"  -         {key}: already open ({status})")
+    wanted = str(op.get("status_before") or "").casefold()
+    transitions = ctx.client.transitions(key)
+    reopen = ([t for t in transitions
+               if str((t.get("to") or {}).get("name", "")).casefold() == wanted]
+              or [t for t in transitions
+                  if ((t.get("to") or {}).get("statusCategory") or {}).get("key") != "done"])
+    if len(reopen) != 1:
+        return UndoStep(f"  -         {key}: can't tell how to reopen it - do that by "
+                        "hand, then run undo again for the rest")
+    transition = reopen[0]
+
+    def do_reopen(journal: Journal) -> str:
+        ctx.client.transition(key, {"transition": {"id": str(transition.get("id"))}})
+        journal.record("reopen", issue=key, status_before=status)
+        return f"reopened {key} ({(transition.get('to') or {}).get('name')})"
+    return UndoStep(f"  reopen    {key}  via {transition.get('name')!r}", do_reopen)
+
+
+def undo_step(ctx: Context, op: dict[str, Any], force: bool) -> UndoStep:
+    if op["op"] in ("close", "reopen"):
+        return _undo_close(ctx, op)
+    if op["op"] in ("create", "update", "delete"):
+        return _undo_worklog(ctx, op, force)
+    if op["op"] == "points":
+        return _undo_points(ctx, op, force)
+    if op["op"] in ("link", "unlink"):
+        return _undo_link(ctx, op)
+    return UndoStep(f"  ?         unknown change {op['op']!r}, skipped")
+
+
 def cmd_undo(args: argparse.Namespace) -> int:
     path = Path(args.journal).expanduser()
     header, ops = _read_journal(path)
@@ -1847,30 +2985,13 @@ def cmd_undo(args: argparse.Namespace) -> int:
     print(f"Journal: {path.name}  ({header.get('command')} at {header.get('at')}, "
           f"{len(ops)} change(s))")
 
-    # (what to do, op, current worklog JSON) - newest first, so a worklog
-    # changed twice is unwound in the right order.
-    steps: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
+    # Newest first, so anything changed twice is unwound in the right order
+    steps: list[UndoStep] = []
     for op in reversed(ops):
-        key, worklog_id = op["issue"], str(op["worklog_id"])
-        where = f"{key} {op['day']} worklog {worklog_id}"
-        current = None if op["op"] == "delete" else ctx.client.worklog(key, worklog_id)
-        if op["op"] == "delete":
-            twin = _find_twin(ctx, key, op["before"])
-            if twin:
-                print(f"  -         {where}: already back as worklog {twin}")
-                continue
-            steps.append(("recreate", op, None))
-            print(f"  recreate  {where}  ({fmt_duration(op['before']['timeSpentSeconds'])})")
-        elif current is None:
-            print(f"  -         {where}: already gone, nothing to undo")
-        elif not args.force and not _same_content(current, op["after"]):
-            print(f"  -         {where}: edited since, leaving it (--force to undo anyway)")
-        elif op["op"] == "create":
-            steps.append(("delete", op, current))
-            print(f"  delete    {where}  ({fmt_duration(current.get('timeSpentSeconds') or 0)})")
-        else:
-            steps.append(("restore", op, current))
-            print(f"  restore   {where}  ({', '.join(op['changed'])})")
+        step = undo_step(ctx, op, args.force)
+        print(step.label)
+        if step.run is not None:
+            steps.append(step)
 
     if not steps:
         print("Nothing to undo.")
@@ -1879,35 +3000,16 @@ def cmd_undo(args: argparse.Namespace) -> int:
         print("Nothing changed.")
         return EXIT_OK
 
-    adjust = ctx.settings.adjust_estimate
     journal = Journal(ctx.settings.journal_dir, "undo", {
         "url": ctx.settings.url, "user": ctx.me.get("name"), "undoes": str(path),
     })
     try:
-        for step, op, current in steps:
-            key, worklog_id = op["issue"], str(op["worklog_id"])
-            day = date.fromisoformat(op["day"])
+        for step in steps:
+            assert step.run is not None
             try:
-                if step == "delete":
-                    assert current is not None
-                    ctx.client.delete_worklog(key, worklog_id, adjust)
-                    journal.op("delete", key, worklog_id, day, before=_snapshot(current))
-                    print(f"  deleted worklog {worklog_id} on {key}")
-                elif step == "restore":
-                    assert current is not None
-                    body = _update_body({f: op["before"][f] for f in op["changed"]},
-                                        op["before"])
-                    updated = ctx.client.update_worklog(key, worklog_id, body, adjust)
-                    journal.op("update", key, worklog_id, day, changed=op["changed"],
-                               before=_snapshot(current), after=_snapshot(updated))
-                    print(f"  restored worklog {worklog_id} on {key}")
-                else:
-                    created = ctx.client.add_worklog(key, dict(op["before"]), adjust)
-                    new_id = str(created.get("id"))
-                    journal.op("create", key, new_id, day, after=_snapshot(created))
-                    print(f"  recreated worklog on {key} as {new_id}")
+                print(f"  {step.run(journal)}")
             except JiraError as exc:
-                print(f"FAILED on {key} worklog {worklog_id}: {exc}")
+                print(f"FAILED: {step.label.strip()}: {exc}")
                 print(f"Stopping. What was done is in {journal.path}")
                 return EXIT_JIRA
     finally:
@@ -1924,6 +3026,15 @@ def _iso_date(text: str) -> date:
         return date.fromisoformat(text)
     except ValueError:
         raise argparse.ArgumentTypeError(f"{text!r} is not YYYY-MM-DD") from None
+
+
+def _year_month(text: str) -> tuple[int, int]:
+    try:
+        year, month = (int(part) for part in text.split("-"))
+        date(year, month, 1)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not YYYY-MM") from None
+    return year, month
 
 
 def _positive_int(text: str) -> int:
@@ -1955,7 +3066,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="also write a full debug log here")
 
     scope = argparse.ArgumentParser(add_help=False)
-    scope.add_argument("export", help="JSON export from timesheets (R, format JSON)")
+    scope.add_argument("export", help="JSON export from timesheets: allocations "
+                                      "(R) or a bill (J in the Billing view)")
     scope.add_argument("--issue", action="append", default=[], metavar="ID",
                        help="only this issue: a timesheets ticket ID or a Jira "
                             "key (repeatable)")
@@ -1965,6 +3077,11 @@ def build_parser() -> argparse.ArgumentParser:
                        metavar="YYYY-MM-DD", help="only from this day")
     scope.add_argument("--to", dest="date_to", type=_iso_date,
                        metavar="YYYY-MM-DD", help="only up to this day")
+    scope.add_argument("--month", type=_year_month, metavar="YYYY-MM",
+                       help="bill exports: the month the billing tickets are "
+                            "named for, if not the bill's own")
+    scope.add_argument("--no-close", action="store_true",
+                       help="bill exports: leave the tickets open this run")
     scope.add_argument("--unentered-only", action="store_true",
                        help="leave alone allocations timesheets already marks "
                             "as entered on client")

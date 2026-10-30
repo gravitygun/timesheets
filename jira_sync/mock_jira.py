@@ -34,6 +34,40 @@ DEFAULT_USER = "mock.user"
 OTHER_USER = "someone.else"
 TIMEZONE = "Europe/London"
 
+POINTS_FIELD = "customfield_10002"
+MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
+               "August", "September", "October", "November", "December")
+LINK_TYPES = [
+    {"id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+    {"id": "10003", "name": "Relates", "inward": "relates to", "outward": "relates to"},
+    {"id": "10100", "name": "Delivers", "inward": "is delivered by",
+     "outward": "delivers"},
+]
+
+# Status -> Jira status category
+STATUSES = {"Open": "new", "Reopened": "new", "In Progress": "indeterminate",
+            "Resolved": "done", "Closed": "done"}
+RESOLUTION_FIELD = {"required": True, "name": "Resolution",
+                    "allowedValues": [{"name": "Done"}, {"name": "Won't Do"}]}
+
+
+def _status_json(name: str) -> dict[str, Any]:
+    return {"name": name, "statusCategory": {"key": STATUSES.get(name, "new")}}
+
+
+def _transitions(status: str) -> list[dict[str, Any]]:
+    """A classic Jira workflow: two ways to a done status, one way back."""
+    if STATUSES.get(status) == "done":
+        return [{"id": "3", "name": "Reopen Issue", "to": _status_json("Reopened"),
+                 "fields": {}}]
+    return [
+        {"id": "5", "name": "Resolve Issue", "to": _status_json("Resolved"),
+         "fields": {"resolution": RESOLUTION_FIELD}},
+        {"id": "2", "name": "Close Issue", "to": _status_json("Closed"),
+         "fields": {"resolution": RESOLUTION_FIELD}},
+    ]
+
+
 STARTED_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{4}$")
 JIRA_TIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%f%z"
 
@@ -77,24 +111,76 @@ class MockJira:
         self.requests: list[tuple[str, str]] = []  # (method, path), for tests
         self.next_id = 100000
         self.issues: dict[str, dict[str, Any]] = {}
+        # Links as Jira stores them: source [outward text] destination
+        self.links: list[dict[str, str]] = []
+        # Make links the other way round from the REST docs, as Jira 8 can
+        self.reversed_links = False
         if state_path and state_path.exists():
             saved = json.loads(state_path.read_text(encoding="utf-8"))
             self.next_id = saved["next_id"]
             self.issues = saved["issues"]
+            self.links = saved.get("links", [])
 
     def save(self) -> None:
         if self.state_path:
             self.state_path.write_text(json.dumps(
-                {"next_id": self.next_id, "issues": self.issues}, indent=2),
-                encoding="utf-8")
+                {"next_id": self.next_id, "issues": self.issues, "links": self.links},
+                indent=2), encoding="utf-8")
 
     def _new_id(self) -> str:
         self.next_id += 1
         return str(self.next_id)
 
-    def add_issue(self, key: str, summary: str) -> None:
+    def add_issue(self, key: str, summary: str, issuetype: str = "Task",
+                  fields: dict[str, Any] | None = None, status: str = "Open") -> None:
         self.issues.setdefault(key.upper(), {
-            "id": self._new_id(), "summary": summary, "worklogs": []})
+            "id": self._new_id(), "summary": summary, "worklogs": [],
+            "issuetype": issuetype, "fields": dict(fields or {}),
+            "status": status, "resolution": None})
+
+    def add_link(self, type_name: str, inward_key: str, outward_key: str) -> dict[str, str]:
+        """Link as the REST docs describe: outward [outward text] inward."""
+        source, destination = outward_key.upper(), inward_key.upper()
+        if self.reversed_links:
+            source, destination = destination, source
+        link = {"id": self._new_id(), "type": type_name, "source": source,
+                "destination": destination}
+        self.links.append(link)
+        return link
+
+    def links_of(self, key: str) -> list[dict[str, str]]:
+        """Links touching key, each as (other key, the text it reads with)."""
+        found = []
+        for link in self.links:
+            kind = next(t for t in LINK_TYPES if t["name"] == link["type"])
+            if link["source"] == key:
+                found.append({"other": link["destination"], "reads": kind["outward"],
+                              "type": link["type"], "id": link["id"]})
+            if link["destination"] == key:
+                found.append({"other": link["source"], "reads": kind["inward"],
+                              "type": link["type"], "id": link["id"]})
+        return found
+
+    def issue_json(self, key: str) -> dict[str, Any]:
+        issue = self.issues[key]
+        links = []
+        for link in self.links:
+            kind = next(t for t in LINK_TYPES if t["name"] == link["type"])
+            for side, here, there in (("outwardIssue", "source", "destination"),
+                                      ("inwardIssue", "destination", "source")):
+                if link[here] == key:
+                    other = link[there]
+                    links.append({"id": link["id"], "type": kind, side: {
+                        "key": other, "fields": {
+                            "summary": self.issues.get(other, {}).get("summary", "")}}})
+        return {"id": issue["id"], "key": key, "fields": {
+            "summary": issue["summary"],
+            "project": {"key": key.rpartition("-")[0]},
+            "issuetype": {"name": issue.get("issuetype", "Task")},
+            "status": _status_json(issue.get("status", "Open")),
+            "resolution": ({"name": issue["resolution"]} if issue.get("resolution")
+                           else None),
+            "issuelinks": links, **issue.get("fields", {})}}
 
     def add_worklog(self, key: str, author: str, started: str, seconds: int,
                     comment: str) -> dict[str, Any]:
@@ -131,6 +217,63 @@ class MockJira:
         }
 
 
+def _key_for(ticket_id: str, prefix: str, project_map: dict[str, str] | None) -> str:
+    """The tool's mapping, in brief: prefix bare numbers, rename projects."""
+    if ticket_id.isdigit():
+        return f"{prefix}{ticket_id}"
+    project, dash, number = ticket_id.upper().rpartition("-")
+    if not dash:
+        return ticket_id.upper()
+    return f"{(project_map or {}).get(project, project)}-{number}"
+
+
+def _seed_bill(mock: MockJira, bill_path: Path, prefix: str, *, initials: str,
+               billing_project: str, project_map: dict[str, str] | None = None,
+               scenario: str | None = None) -> None:
+    """Billing tickets for a bill export's month, as someone else makes them.
+
+    One per deliverable on the bill, with made-up projected points; two for
+    deliverables not on it; and two that must be left alone - someone else's,
+    and one of yours for the month before. Plus the work tickets to link to.
+    --scenario demo adds a link already in place and a stray one.
+    """
+    data = json.loads(bill_path.read_text(encoding="utf-8"))
+    when = data.get("delivered") or data["billed"]
+    year, month = int(when["year"]), int(when["month"])
+    deliverables = [str(line["deliverable_id"]) for line in data["lines"]
+                    if line.get("deliverable_id")]
+    numbers = iter(range(501, 10000))
+
+    def ticket(deliverable: str, points: float, who: str = initials,
+               month_index: int = month) -> str:
+        key = f"{billing_project}-{next(numbers)}"
+        summary = f"{who}-{deliverable}-{MONTH_NAMES[month_index - 1]}-{year}"
+        mock.add_issue(key, summary, fields={POINTS_FIELD: points})
+        return key
+
+    keys = [ticket(d, 10.0) for d in deliverables]
+    for spare in ("WP4-D1", "WP5-D1"):
+        if spare not in deliverables:
+            ticket(spare, 8.0)
+    first = deliverables[0] if deliverables else "WP2d-D1"
+    ticket(first, 5.0, who="XY")
+    last_month = ticket(first, 12.0, month_index=12 if month == 1 else month - 1)
+    mock.issues[last_month]["status"] = "Closed"
+    mock.issues[last_month]["resolution"] = "Done"
+
+    for line in data["lines"]:
+        for t in line.get("tickets", []):
+            mock.add_issue(_key_for(str(t["ticket_id"]), prefix, project_map),
+                           str(t.get("description") or ""))
+
+    if scenario == "demo" and keys and data["lines"][0].get("tickets"):
+        work = _key_for(str(data["lines"][0]["tickets"][0]["ticket_id"]), prefix,
+                        project_map)
+        mock.add_link("Delivers", keys[0], work)
+        mock.add_issue(f"{prefix}99998", "Something not on this bill")
+        mock.add_link("Delivers", keys[0], f"{prefix}99998")
+
+
 def _seed(mock: MockJira, export_path: Path, prefix: str, *, entered: bool,
           scenario: str | None, missing: set[str],
           project_map: dict[str, str] | None = None) -> None:
@@ -143,12 +286,7 @@ def _seed(mock: MockJira, export_path: Path, prefix: str, *, entered: bool,
     data = json.loads(export_path.read_text(encoding="utf-8"))
 
     def key_for(ticket_id: str) -> str:
-        if ticket_id.isdigit():
-            return f"{prefix}{ticket_id}"
-        project, dash, number = ticket_id.upper().rpartition("-")
-        if not dash:
-            return ticket_id.upper()
-        return f"{(project_map or {}).get(project, project)}-{number}"
+        return _key_for(ticket_id, prefix, project_map)
 
     for ticket_id, description in data.get("tickets", {}).items():
         key = key_for(ticket_id)
@@ -257,6 +395,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, _user(mock.user))
             if path == "/rest/api/2/search" and method == "GET":
                 return self._search(query)
+            if path == "/rest/api/2/field" and method == "GET":
+                return self._send(200, [
+                    {"id": "summary", "name": "Summary", "custom": False},
+                    {"id": POINTS_FIELD, "name": "Story Points", "custom": True,
+                     "schema": {"type": "number"}}])
+            if path == "/rest/api/2/issueLinkType" and method == "GET":
+                return self._send(200, {"issueLinkTypes": LINK_TYPES})
+            if path == "/rest/api/2/issueLink" and method == "POST":
+                return self._create_link()
+            link_match = re.fullmatch(r"/rest/api/2/issueLink/(\d+)", path)
+            if link_match:
+                link = next((k for k in mock.links if k["id"] == link_match.group(1)), None)
+                if link is None:
+                    return self._error(404, "No issue link with id " + link_match.group(1))
+                if method == "DELETE":
+                    mock.links.remove(link)
+                    mock.save()
+                    return self._send(204)
+                return self._send(200, {"id": link["id"], "type": {"name": link["type"]},
+                                        "inwardIssue": {"key": link["destination"]},
+                                        "outwardIssue": {"key": link["source"]}})
+
+            transitions = re.fullmatch(r"/rest/api/2/issue/([^/]+)/transitions", path)
+            if transitions:
+                return self._transition(transitions.group(1).upper(), method)
 
             match = re.fullmatch(r"/rest/api/2/issue/([^/]+)(/worklog(?:/(\d+))?)?", path)
             if not match:
@@ -266,11 +429,19 @@ class Handler(BaseHTTPRequestHandler):
             if issue is None:
                 return self._error(404, "Issue Does Not Exist")
             if not match.group(2):
-                if method != "GET":
-                    return self._error(405, "Method not allowed")
-                return self._send(200, {"id": issue["id"], "key": key, "fields": {
-                    "summary": issue["summary"], "status": {"name": "In Progress"},
-                    "project": {"key": key.rpartition("-")[0]}}})
+                if method == "GET":
+                    return self._send(200, mock.issue_json(key))
+                if method == "PUT":
+                    body_fields = self._body().get("fields", {})
+                    if STATUSES.get(issue.get("status", "Open")) == "done":
+                        # As a workflow that locks closed issues answers
+                        return self._error(400, errors={
+                            f: f"Field '{f}' cannot be set. It is not on the "
+                               "appropriate screen, or unknown." for f in body_fields})
+                    issue.setdefault("fields", {}).update(body_fields)
+                    mock.save()
+                    return self._send(204)
+                return self._error(405, "Method not allowed")
             worklog_id = match.group(3)
             if worklog_id is None:
                 if method == "GET":
@@ -340,21 +511,70 @@ class Handler(BaseHTTPRequestHandler):
         self.mock.save()
         self._send(200, self.mock.worklog_json(key, record))
 
+    def _transition(self, key: str, method: str) -> None:
+        issue = self.mock.issues.get(key)
+        if issue is None:
+            return self._error(404, "Issue Does Not Exist")
+        available = _transitions(issue.get("status", "Open"))
+        if method == "GET":
+            return self._send(200, {"expand": "transitions", "transitions": available})
+        if method != "POST":
+            return self._error(405, "Method not allowed")
+        body = self._body()
+        wanted = str((body.get("transition") or {}).get("id", ""))
+        chosen = next((t for t in available if t["id"] == wanted), None)
+        if chosen is None:
+            return self._error(400, f"It seems that you have tried to perform a "
+                                    f"workflow operation ({wanted}) that is not valid "
+                                    "for the current state of this issue.")
+        resolution = ((body.get("fields") or {}).get("resolution") or {}).get("name")
+        if "resolution" in chosen["fields"] and not resolution:
+            return self._error(400, errors={"resolution": "Resolution is required."})
+        issue["status"] = chosen["to"]["name"]
+        issue["resolution"] = resolution if STATUSES[issue["status"]] == "done" else None
+        self.mock.save()
+        self._send(204)
+
+    def _create_link(self) -> None:
+        body = self._body()
+        type_name = (body.get("type") or {}).get("name", "")
+        if not any(t["name"] == type_name for t in LINK_TYPES):
+            return self._error(404, f"No issue link type with name '{type_name}' found.")
+        keys = [str((body.get(side) or {}).get("key", "")).upper()
+                for side in ("inwardIssue", "outwardIssue")]
+        for key in keys:
+            if key not in self.mock.issues:
+                return self._error(404, f"Issue Does Not Exist: {key}")
+        self.mock.add_link(type_name, keys[0], keys[1])
+        self.mock.save()
+        self._send(201)
+
     def _search(self, query: dict[str, str]) -> None:
-        """Only the one JQL shape the tool sends: your worklogs between dates."""
+        """The two JQL shapes the tool sends: your worklogs between dates, and
+        a project's issues by type and summary words."""
         jql = query.get("jql", "")
-        low = re.search(r'worklogDate\s*>=\s*"?(\d{4}-\d{2}-\d{2})', jql)
-        high = re.search(r'worklogDate\s*<=\s*"?(\d{4}-\d{2}-\d{2})', jql)
-        if "worklogAuthor" not in jql or not low or not high:
-            return self._error(400, f"Mock search can't handle: {jql}")
-        first, last = date.fromisoformat(low.group(1)), date.fromisoformat(high.group(1))
-        found = [
-            {"id": issue["id"], "key": key, "fields": {"summary": issue["summary"]}}
-            for key, issue in sorted(self.mock.issues.items())
-            if any(w["author"] == self.mock.user
-                   and first <= _local_day(w["started"]) <= last
-                   for w in issue["worklogs"])
-        ]
+        if "worklogAuthor" in jql:
+            low = re.search(r'worklogDate\s*>=\s*"?(\d{4}-\d{2}-\d{2})', jql)
+            high = re.search(r'worklogDate\s*<=\s*"?(\d{4}-\d{2}-\d{2})', jql)
+            if not low or not high:
+                return self._error(400, f"Mock search can't handle: {jql}")
+            first, last = date.fromisoformat(low.group(1)), date.fromisoformat(high.group(1))
+            keys = [key for key, issue in sorted(self.mock.issues.items())
+                    if any(w["author"] == self.mock.user
+                           and first <= _local_day(w["started"]) <= last
+                           for w in issue["worklogs"])]
+        else:
+            project = re.search(r'project\s*=\s*"?([A-Z0-9_]+)', jql)
+            if not project:
+                return self._error(400, f"Mock search can't handle: {jql}")
+            issuetype = re.search(r'issuetype\s*=\s*"([^"]+)"', jql)
+            words = [w.casefold() for w in re.findall(r'summary\s*~\s*"([^"]+)"', jql)]
+            keys = [key for key, issue in sorted(self.mock.issues.items())
+                    if key.startswith(project.group(1) + "-")
+                    and (not issuetype
+                         or issue.get("issuetype", "Task") == issuetype.group(1))
+                    and all(w in issue["summary"].casefold() for w in words)]
+        found = [self.mock.issue_json(key) for key in keys]
         start = int(query.get("startAt", 0))
         size = int(query.get("maxResults", 50))
         self._send(200, {"startAt": start, "maxResults": size, "total": len(found),
@@ -420,6 +640,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="demo: add one of each discrepancy the tool handles")
     parser.add_argument("--missing", action="append", default=[], metavar="KEY",
                         help="leave this issue out, to rehearse a mapping error")
+    parser.add_argument("--seed-bill", metavar="BILL",
+                        help="create billing tickets for this bill export's month")
+    parser.add_argument("--initials", default="WB",
+                        help="whose billing tickets to create (default WB)")
+    parser.add_argument("--billing-project", default="PITLAI",
+                        help="billing project key (default PITLAI)")
+    parser.add_argument("--reversed-links", action="store_true",
+                        help="make links the other way round, as Jira 8 can")
     args = parser.parse_args(argv)
 
     state = Path(args.state) if args.state else None
@@ -427,14 +655,20 @@ def main(argv: list[str] | None = None) -> int:
         state.unlink()
     resumed = bool(state and state.exists())
     mock = MockJira(args.user, args.token, state)
+    mock.reversed_links = args.reversed_links
     if args.seed and not resumed:
         _seed(mock, Path(args.seed), args.prefix.upper(),
               entered=args.seed_entered, scenario=args.scenario,
               missing={k.upper() for k in args.missing},
               project_map=dict(args.project_map))
+    if args.seed_bill and not resumed:
+        _seed_bill(mock, Path(args.seed_bill), args.prefix.upper(),
+                   initials=args.initials, billing_project=args.billing_project.upper(),
+                   project_map=dict(args.project_map), scenario=args.scenario)
+    if (args.seed or args.seed_bill) and resumed:
+        print(f"Resuming {state}; seeding ignored (add --reset to reseed)")
+    elif args.seed or args.seed_bill:
         mock.save()
-    elif args.seed:
-        print(f"Resuming {state}; --seed ignored (add --reset to reseed)")
 
     server = make_server(mock, port=args.port)
     worklogs = sum(len(i["worklogs"]) for i in mock.issues.values())

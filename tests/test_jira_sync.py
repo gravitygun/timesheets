@@ -986,3 +986,554 @@ class TestStepReview:
         out = capsys.readouterr().out
         assert "1h -> 2h" in out
         assert out.index("in Jira now") < out.index("Will become:") < out.index("from timesheet", out.index("Will become:"))
+
+
+# --- Billing ---------------------------------------------------------------
+
+
+def _bill_doc(lines: list[tuple[str | None, int, list[str]]], year: int = 2026,
+              month: int = 10) -> dict[str, Any]:
+    """A bill export like storage.get_bill_export writes."""
+    return {
+        "schema": "timesheets.bill",
+        "version": 1,
+        "generated_at": "2026-10-31T17:00:00+00:00",
+        "billed": {"year": year, "month": month},
+        "delivered": {"year": year, "month": month},
+        "lines": [
+            {"deliverable_id": deliverable, "deliverable_title": f"Title {deliverable}",
+             "work_package_id": "WP", "hours": points * 2.0, "points": points,
+             "tickets": [{"ticket_id": t, "description": f"Work {t}", "hours": 1.0}
+                         for t in tickets]}
+            for deliverable, points, tickets in lines
+        ],
+    }
+
+
+class TestBillingNames:
+    def _settings(self, **overrides: Any) -> sw.Settings:
+        return _settings(billing_initials="WB", **overrides)
+
+    def test_summary_and_pattern(self):
+        settings = self._settings()
+        assert sw.billing_summary(settings, "WP2d-D1", 2026, 10) == "WB-WP2d-D1-October-2026"
+        pattern = sw.billing_pattern(settings, 2026, 10)
+        match = pattern.fullmatch("wb-WP5a-D2-october-2026")
+        assert match and match.group("deliverable") == "WP5a-D2"
+        assert not pattern.fullmatch("XY-WP5a-D2-October-2026")
+        assert not pattern.fullmatch("WB-WP5a-D2-September-2026")
+        assert not pattern.fullmatch("WB-WP5a-D2-October-2026 (copy)")
+
+    def test_other_formats(self):
+        settings = self._settings(billing_summary="{year}/{mm} {initials} {deliverable}")
+        assert sw.billing_summary(settings, "WP4-D1", 2026, 3) == "2026/03 WB WP4-D1"
+
+    def test_jql_avoids_text_search(self):
+        # Jira indexes WB-WP5-D4-September-2026 as one word, so searching for
+        # its parts finds nothing; the summary pattern does the picking.
+        jql = sw.billing_jql(self._settings(), 2026, 10)
+        assert jql == 'project = "PITLAI" AND issuetype = "Task" ORDER BY created DESC'
+
+    def test_custom_jql(self):
+        settings = self._settings(billing_jql="project = X AND summary ~ {month}")
+        assert sw.billing_jql(settings, 2026, 10) == "project = X AND summary ~ October"
+
+    @pytest.mark.parametrize("body", [
+        "[billing]\nsummary_format = {initials}-{month}\n",
+        "[billing]\nsummary_format = {initials}-{deliverable}-{when}\n",
+        "[billing]\njql = project = X AND summary ~ {deliverable}\n",
+    ])
+    def test_bad_formats_are_config_errors(self, tmp_path, monkeypatch, body):
+        monkeypatch.setenv(sw.TOKEN_ENV, "t")
+        path = tmp_path / "c.ini"
+        path.write_text("[jira]\nurl = https://j\n" + body)
+        path.chmod(0o600)
+        with pytest.raises(sw.ConfigError):
+            sw.load_settings(path)
+
+
+class TestReadLinks:
+    def _issue(self, *links: dict[str, Any]) -> dict[str, Any]:
+        return {"fields": {"issuelinks": list(links)}}
+
+    def test_reading_from_each_side(self):
+        delivers = {"name": "Delivers", "inward": "is delivered by", "outward": "delivers"}
+        issue = self._issue(
+            {"id": "1", "type": delivers, "inwardIssue": {"key": "MPIT-1"}},
+            {"id": "2", "type": delivers, "outwardIssue": {"key": "MPIT-2"}},
+            {"id": "3", "type": {"name": "Blocks", "inward": "is blocked by",
+                                 "outward": "blocks"}, "inwardIssue": {"key": "MPIT-3"}},
+        )
+        forward, backward = sw.read_links(issue, "Is Delivered By")
+        assert forward == {"MPIT-1": "1"}
+        assert backward == {"MPIT-2": "2"}
+
+
+class TestBillExport:
+    def test_read_export_tells_the_kinds_apart(self, tmp_path):
+        bill = tmp_path / "bill.json"
+        bill.write_text(json.dumps(_bill_doc([("WP2d-D1", 7, ["10400"])])))
+        loaded = sw.read_export(bill)
+        assert isinstance(loaded, sw.BillExport)
+        assert loaded.month_name == "October 2026"
+        assert loaded.lines[0].tickets == [("10400", "Work 10400")]
+
+        allocations = tmp_path / "a.json"
+        allocations.write_text(json.dumps(_export_doc([("1", "2026-10-05", 1, "x")])))
+        assert isinstance(sw.read_export(allocations), sw.Export)
+
+    def test_named_for_the_delivered_month(self, tmp_path):
+        doc = _bill_doc([("WP2d-D1", 7, [])], month=11)
+        doc["delivered"] = {"year": 2026, "month": 10}
+        path = tmp_path / "bill.json"
+        path.write_text(json.dumps(doc))
+        loaded = sw.read_export(path)
+        assert isinstance(loaded, sw.BillExport)
+        assert (loaded.year, loaded.month, loaded.billed) == (2026, 10, (2026, 11))
+
+    def test_rejects_other_versions(self, tmp_path):
+        doc = {**_bill_doc([]), "version": 9}
+        path = tmp_path / "bill.json"
+        path.write_text(json.dumps(doc))
+        with pytest.raises(sw.ConfigError, match="version 9"):
+            sw.read_export(path)
+
+
+class BillRig:
+    """A rig with billing tickets for October 2026, and a bill export."""
+
+    def __init__(self, rig: Rig) -> None:
+        self.rig = rig
+        self.mock = rig.mock
+        self.bill = rig.tmp_path / "bill.json"
+        rig.write_config("[billing]\ninitials = WB\n[project_map]\nFD = MPITFD\n")
+        for key, summary, points in (
+            ("PITLAI-1", "WB-WP2d-D1-October-2026", 10.0),
+            ("PITLAI-2", "WB-WP5-D4-October-2026", 10.0),
+            ("PITLAI-3", "WB-WP4-D1-October-2026", 8.0),      # not on the bill
+            ("PITLAI-4", "XY-WP2d-D1-October-2026", 5.0),     # someone else's
+            ("PITLAI-5", "WB-WP2d-D1-September-2026", 12.0),  # last month's
+        ):
+            self.mock.add_issue(key, summary, fields={mock_jira.POINTS_FIELD: points})
+        self.mock.add_issue("MPITFD-7", "FD work")
+
+    def write(self, lines: list[tuple[str | None, int, list[str]]]) -> None:
+        self.bill.write_text(json.dumps(_bill_doc(lines)))
+
+    def run(self, *args: str) -> int:
+        command, *rest = args
+        return sw.main([command, "--config", str(self.rig.tmp_path / "config.ini"),
+                        str(self.bill), *rest] if command != "undo" else
+                       [command, "--config", str(self.rig.tmp_path / "config.ini"), *rest])
+
+    def points(self) -> dict[str, Any]:
+        return {k: i["fields"].get(mock_jira.POINTS_FIELD)
+                for k, i in self.mock.issues.items() if k.startswith("PITLAI")}
+
+    def delivered_by(self, key: str) -> set[str]:
+        return {link["other"] for link in self.mock.links_of(key)
+                if link["reads"] == "is delivered by"}
+
+
+@pytest.fixture
+def billing(rig: Rig) -> BillRig:
+    return BillRig(rig)
+
+
+class TestBilling:
+    def test_plan_changes_nothing(self, billing, capsys):
+        billing.write([("WP2d-D1", 7, ["1", "FD-7"])])
+        assert billing.run("plan") == sw.EXIT_OK
+        out = capsys.readouterr().out
+        assert "story points 10 -> 7" in out
+        assert "is delivered by MPITFD-7" in out
+        assert billing.rig.writes() == []
+
+    def test_apply_sets_points_zeroes_the_rest_and_links(self, billing, capsys):
+        billing.write([("WP2d-D1", 7, ["1", "FD-7"]), ("WP5-D4", 3, ["2"])])
+        assert billing.run("apply", "--yes", "--no-close") == sw.EXIT_OK
+        assert "Verified: all 6 change(s)" in capsys.readouterr().out
+        assert billing.points() == {"PITLAI-1": 7.0, "PITLAI-2": 3.0, "PITLAI-3": 0.0,
+                                    "PITLAI-4": 5.0, "PITLAI-5": 12.0}
+        assert billing.delivered_by("PITLAI-1") == {"MPIT-1", "MPITFD-7"}
+        assert billing.delivered_by("PITLAI-2") == {"MPIT-2"}
+        assert billing.delivered_by("PITLAI-4") == billing.delivered_by("PITLAI-5") == set()
+        # Sent as numbers, as the story points field wants
+        assert isinstance(billing.mock.issues["PITLAI-1"]["fields"][mock_jira.POINTS_FIELD],
+                          float)
+
+        before = len(billing.rig.writes())
+        assert billing.run("apply", "--yes", "--no-close") == sw.EXIT_OK
+        assert len(billing.rig.writes()) == before
+        assert billing.run("verify", "--no-close") == sw.EXIT_OK
+        assert billing.run("verify") == sw.EXIT_DIFFERENCES  # still open
+
+    def test_reversed_links_are_corrected(self, billing, capsys):
+        billing.mock.reversed_links = True
+        billing.write([("WP2d-D1", 7, ["1", "FD-7"])])
+        assert billing.run("apply", "--yes") == sw.EXIT_OK
+        assert "other way round" in capsys.readouterr().err
+        assert billing.delivered_by("PITLAI-1") == {"MPIT-1", "MPITFD-7"}
+        assert len(billing.mock.links) == 2  # the wrong one was removed
+
+    def test_existing_extra_and_backwards_links(self, billing, capsys):
+        billing.mock.add_issue("MPIT-9", "Not on the bill")
+        billing.mock.add_link("Delivers", "PITLAI-1", "MPIT-1")    # right already
+        billing.mock.add_link("Delivers", "PITLAI-1", "MPIT-9")    # extra
+        billing.mock.add_link("Delivers", "MPITFD-7", "PITLAI-1")  # wrong way round
+        billing.write([("WP2d-D1", 7, ["1", "FD-7"])])
+        assert billing.run("verify") == sw.EXIT_DIFFERENCES
+        out = capsys.readouterr().out
+        assert "1 links already right; 1 reversed, 1 extra links" in out
+        # The reversed link means PITLAI-1 doesn't check out, so it stays open
+        assert billing.run("apply", "--yes") == sw.EXIT_DIFFERENCES
+        assert "PITLAI-1: left open" in capsys.readouterr().out
+        assert len(billing.mock.links) == 3  # nothing added, nothing removed
+        assert billing.mock.issues["PITLAI-1"]["status"] == "Open"
+        assert billing.mock.issues["PITLAI-3"]["status"] == "Closed"
+
+    def test_missing_ticket_duplicate_and_no_deliverable_block(self, billing, capsys):
+        billing.mock.add_issue("PITLAI-6", "WB-WP5-D4-October-2026",
+                               fields={mock_jira.POINTS_FIELD: 1.0})
+        billing.write([("WP2d-D1", 7, ["1"]), ("WP5-D4", 3, ["2"]),
+                       ("WP9-D9", 2, ["3"]), (None, 1, ["4"])])
+        assert billing.run("apply", "--yes") == sw.EXIT_JIRA
+        out = capsys.readouterr().out
+        assert "no PITLAI ticket named WB-WP9-D9-October-2026" in out
+        assert "2 tickets named WB-WP5-D4-October-2026 (PITLAI-2, PITLAI-6)" in out
+        assert "have no deliverable" in out
+        assert billing.rig.writes() == []
+
+    def test_unknown_work_ticket_blocks(self, billing, capsys):
+        billing.write([("WP2d-D1", 7, ["404"])])
+        assert billing.run("apply", "--yes") == sw.EXIT_JIRA
+        assert "MPIT-404: work ticket not found" in capsys.readouterr().out
+
+    def test_undo(self, billing):
+        billing.write([("WP2d-D1", 7, ["1"])])
+        assert billing.run("apply", "--yes", "--no-close") == sw.EXIT_OK
+        assert billing.run("undo", str(billing.rig.last_journal()), "--yes") == sw.EXIT_OK
+        assert billing.points()["PITLAI-1"] == 10.0
+        assert billing.points()["PITLAI-3"] == 8.0
+        assert billing.mock.links == []
+
+        # Undoing the undo puts it all back, link included
+        [undo] = billing.rig.journals.glob("undo-*.jsonl")
+        assert billing.run("undo", str(undo), "--yes") == sw.EXIT_OK
+        assert billing.points()["PITLAI-1"] == 7.0
+        assert billing.delivered_by("PITLAI-1") == {"MPIT-1"}
+
+    def test_undo_leaves_points_changed_since(self, billing, capsys):
+        billing.write([("WP2d-D1", 7, [])])
+        assert billing.run("apply", "--yes", "--no-close") == sw.EXIT_OK
+        billing.mock.issues["PITLAI-1"]["fields"][mock_jira.POINTS_FIELD] = 9.0
+        assert billing.run("undo", str(billing.rig.last_journal()), "--yes") == sw.EXIT_OK
+        assert "changed since" in capsys.readouterr().out
+        assert billing.points()["PITLAI-1"] == 9.0
+
+    def test_month_override(self, billing):
+        billing.write([("WP2d-D1", 4, [])])
+        assert billing.run("apply", "--yes", "--no-close", "--month", "2026-09") == sw.EXIT_OK
+        assert billing.points()["PITLAI-5"] == 4.0
+        assert billing.points()["PITLAI-1"] == 10.0
+
+    def test_step_review(self, billing, monkeypatch):
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        answers = iter(["y", "s", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        billing.write([("WP2d-D1", 7, ["1"])])
+        assert billing.run("apply", "--yes", "--step") == sw.EXIT_OK
+        assert billing.points()["PITLAI-1"] == 7.0       # y
+        assert billing.mock.links == []                  # s
+        assert billing.points()["PITLAI-3"] == 8.0       # q: not reviewed
+
+    def test_change_while_waiting_stops(self, billing, monkeypatch, capsys):
+        billing.write([("WP2d-D1", 7, [])])
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+        def meanwhile(prompt):
+            billing.mock.issues["PITLAI-1"]["fields"][mock_jira.POINTS_FIELD] = 3.0
+            return "yes"
+
+        monkeypatch.setattr("builtins.input", meanwhile)
+        assert billing.run("apply") == sw.EXIT_DIFFERENCES
+        assert "while waiting" in capsys.readouterr().out
+        assert billing.points()["PITLAI-3"] == 8.0
+
+    def test_custom_jql_is_used(self, billing, monkeypatch):
+        real = sw.JiraClient.search
+        jqls = []
+
+        def spy(self, jql, fields="summary"):
+            jqls.append(jql)
+            return real(self, jql, fields)
+
+        monkeypatch.setattr(sw.JiraClient, "search", spy)
+        billing.rig.write_config("[billing]\ninitials = WB\n"
+                                 "jql = project = PITLAI AND summary ~ {month}\n")
+        billing.write([("WP2d-D1", 7, [])])
+        assert billing.run("plan") == sw.EXIT_OK
+        assert jqls == ["project = PITLAI AND summary ~ October"]
+
+    @pytest.mark.parametrize(("command", "option"), [
+        ("plan", ["--date", "2026-10-05"]), ("plan", ["--issue", "1"]),
+        ("plan", ["--delete-extra"]), ("apply", ["--edit"]),
+        ("apply", ["--edits", "x.txt"]),
+    ])
+    def test_worklog_options_are_refused(self, billing, command, option):
+        billing.write([("WP2d-D1", 7, [])])
+        assert billing.run(command, *option) == sw.EXIT_USAGE
+        assert billing.rig.writes() == []
+
+    @pytest.mark.parametrize("option", [["--month", "2026-10"], ["--no-close"]])
+    def test_bill_options_refused_for_allocations(self, rig, option):
+        rig.write_export([("1", "2026-10-05", 1, "x")])
+        assert rig.run("plan", *option) == sw.EXIT_USAGE
+
+    def test_needs_initials(self, rig, capsys):
+        rig.export.write_text(json.dumps(_bill_doc([("WP2d-D1", 7, [])])))
+        assert rig.run("plan") == sw.EXIT_USAGE
+        assert "initials" in capsys.readouterr().err
+
+    def test_check_reports_billing(self, billing, capsys):
+        assert sw.main(["check", "--config",
+                        str(billing.rig.tmp_path / "config.ini")]) == sw.EXIT_OK
+        out = capsys.readouterr().out
+        assert "customfield_10002 (Story Points)" in out
+        assert "(type Delivers)" in out
+
+
+def test_mock_seed_bill(tmp_path):
+    bill = tmp_path / "bill.json"
+    bill.write_text(json.dumps(_bill_doc([("WP2d-D1", 7, ["10400", "FD-2587"])])))
+    mock = mock_jira.MockJira()
+    mock_jira._seed_bill(mock, bill, "MPIT-", initials="WB", billing_project="PITLAI",
+                         project_map={"FD": "MPITFD"})
+    summaries = sorted(i["summary"] for k, i in mock.issues.items() if k.startswith("PITLAI"))
+    assert summaries == ["WB-WP2d-D1-October-2026", "WB-WP2d-D1-September-2026",
+                         "WB-WP4-D1-October-2026", "WB-WP5-D1-October-2026",
+                         "XY-WP2d-D1-October-2026"]
+    assert {"MPIT-10400", "MPITFD-2587"} <= set(mock.issues)
+
+
+class TestClosing:
+    """Tickets close once they match the bill: that's what gets them paid."""
+
+    def test_closes_every_ticket_once_right(self, billing, capsys):
+        billing.write([("WP2d-D1", 7, ["1"]), ("WP5-D4", 3, [])])
+        assert billing.run("apply", "--yes") == sw.EXIT_OK
+        out = capsys.readouterr().out
+        assert "Then closing, for each ticket that checks out:" in out
+        statuses = {k: (i["status"], i["resolution"])
+                    for k, i in billing.mock.issues.items() if k.startswith("PITLAI")}
+        assert statuses == {
+            "PITLAI-1": ("Closed", "Done"), "PITLAI-2": ("Closed", "Done"),
+            "PITLAI-3": ("Closed", "Done"),          # set to 0, closed too
+            "PITLAI-4": ("Open", None),              # someone else's
+            "PITLAI-5": ("Open", None),              # last month's
+        }
+        assert billing.run("verify") == sw.EXIT_OK
+        assert billing.run("apply", "--yes") == sw.EXIT_OK
+        assert "Nothing to change" in capsys.readouterr().out
+
+    def test_closes_come_last_so_limit_reaches_them_last(self, billing, capsys):
+        billing.write([("WP2d-D1", 7, ["1"])])
+        assert billing.run("apply", "--yes", "--limit", "3") == sw.EXIT_OK
+        assert all(billing.mock.issues[k]["status"] == "Open"
+                   for k in ("PITLAI-1", "PITLAI-3"))
+
+    def test_closed_and_right_is_left_alone(self, billing):
+        billing.mock.issues["PITLAI-1"]["status"] = "Closed"
+        billing.mock.issues["PITLAI-1"]["fields"][mock_jira.POINTS_FIELD] = 7.0
+        billing.mock.add_link("Delivers", "PITLAI-1", "MPIT-1")
+        billing.write([("WP2d-D1", 7, ["1"])])
+        assert billing.run("apply", "--yes") == sw.EXIT_OK
+        assert billing.mock.issues["PITLAI-1"]["status"] == "Closed"
+
+    def test_closed_but_wrong_is_never_edited(self, billing, capsys):
+        billing.mock.issues["PITLAI-1"]["status"] = "Closed"
+        billing.write([("WP2d-D1", 7, ["1"])])
+        assert billing.run("apply", "--yes") == sw.EXIT_JIRA
+        out = capsys.readouterr().out
+        assert "Closed, but its story points are 10, not 7 - reopen it by hand" in out
+        assert "Closed, but not linked to this" in out
+        assert billing.rig.writes() == []
+        # With --skip-missing the rest go ahead, and PITLAI-1 is untouched
+        assert billing.run("apply", "--yes", "--skip-missing") == sw.EXIT_OK
+        assert billing.points()["PITLAI-1"] == 10.0
+        assert billing.points()["PITLAI-3"] == 0.0
+
+    def test_named_transition_and_resolution(self, billing):
+        billing.rig.write_config("[billing]\ninitials = WB\n"
+                                 "close_transition = Resolve Issue\n"
+                                 "resolution = Won't Do\n")
+        billing.write([("WP2d-D1", 7, [])])
+        assert billing.run("apply", "--yes") == sw.EXIT_OK
+        assert billing.mock.issues["PITLAI-1"]["status"] == "Resolved"
+        assert billing.mock.issues["PITLAI-1"]["resolution"] == "Won't Do"
+
+    def test_unknown_transition_or_resolution_blocks(self, billing, capsys):
+        billing.rig.write_config("[billing]\ninitials = WB\nresolution = Paid\n")
+        billing.write([("WP2d-D1", 7, [])])
+        assert billing.run("apply", "--yes") == sw.EXIT_JIRA
+        assert "resolution 'Paid' isn't allowed here (Done, Won't Do)" in \
+            capsys.readouterr().out
+        assert billing.rig.writes() == []
+
+    def test_undo_reopens_then_restores(self, billing):
+        billing.write([("WP2d-D1", 7, ["1"])])
+        assert billing.run("apply", "--yes") == sw.EXIT_OK
+        assert billing.run("undo", str(billing.rig.last_journal()), "--yes") == sw.EXIT_OK
+        assert billing.mock.issues["PITLAI-1"]["status"] == "Reopened"
+        assert billing.points()["PITLAI-1"] == 10.0
+        assert billing.mock.links == []
+
+        [undo] = billing.rig.journals.glob("undo-*.jsonl")
+        assert billing.run("undo", str(undo), "--yes") == sw.EXIT_OK
+        assert billing.mock.issues["PITLAI-1"]["status"] == "Closed"
+        assert billing.points()["PITLAI-1"] == 7.0
+
+    def test_step_review_can_skip_a_close(self, billing, monkeypatch):
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        # Points and link on PITLAI-1, zeroes on PITLAI-3 and -2, then the
+        # closes: send PITLAI-1's, skip PITLAI-3's, stop before PITLAI-2's
+        answers = iter(["y", "y", "y", "y", "y", "s", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        billing.write([("WP2d-D1", 7, ["1"])])
+        assert billing.run("apply", "--yes", "--step") == sw.EXIT_OK
+        assert billing.mock.issues["PITLAI-1"]["status"] == "Closed"
+        assert billing.mock.issues["PITLAI-3"]["status"] == "Open"
+        assert billing.mock.issues["PITLAI-2"]["status"] == "Open"
+        assert billing.points()["PITLAI-2"] == 0.0
+
+
+# --- Moves -----------------------------------------------------------------
+
+
+class TestPairMoves:
+    def _stray(self, key: str, day: int, seconds: int = 3600, comment: str = "did things",
+               kind: str = sw.UNEXPECTED, wid: str = "900") -> sw.Action:
+        wl = sw.Worklog(wid, key, date(2026, 10, day),
+                        f"2026-10-{day:02d}T15:00:00.000+0000", seconds, comment)
+        return sw.Action(kind, key, wl.day, worklogs=[wl])
+
+    def _create(self, key: str, day: int, seconds: int = 3600,
+                comment: str = "did things") -> sw.Action:
+        return sw.Action(sw.CREATE, key, date(2026, 10, day),
+                         allocation=_alloc(day, seconds, comment, key=key))
+
+    def test_same_day_and_length_pairs(self):
+        [move] = sw.pair_moves([self._create("MPIT-2", 5), self._stray("MPIT-1", 5)],
+                               update_comments=False)
+        assert move.kind == sw.MOVE
+        assert move.issue_key == "MPIT-2"
+        assert move.worklogs[0].issue_key == "MPIT-1"
+        assert move.note == "from MPIT-1"
+
+    def test_extra_on_an_exported_issue_pairs_too(self):
+        actions = [self._create("MPIT-2", 5), self._stray("MPIT-1", 5, kind=sw.EXTRA)]
+        assert [a.kind for a in sw.pair_moves(actions, update_comments=False)] == [sw.MOVE]
+
+    @pytest.mark.parametrize("actions", [
+        lambda t: [t._create("MPIT-2", 5), t._stray("MPIT-1", 6)],              # other day
+        lambda t: [t._create("MPIT-2", 5), t._stray("MPIT-1", 5, 1800)],        # other length
+        lambda t: [t._create("MPIT-1", 5), t._stray("MPIT-1", 5)],              # same issue
+        lambda t: [t._create("MPIT-2", 5, comment="x"), t._create("MPIT-3", 5, comment="y"),
+                   t._stray("MPIT-1", 5, comment="z")],                         # can't tell
+    ])
+    def test_no_pair(self, actions):
+        given = actions(self)
+        assert sw.pair_moves(list(given), update_comments=False) == given
+
+    def test_comment_settles_a_tie(self):
+        actions = [self._create("MPIT-2", 5, comment="first"),
+                   self._create("MPIT-3", 5, comment="second"),
+                   self._stray("MPIT-1", 5, comment="second")]
+        result = sw.pair_moves(actions, update_comments=False)
+        assert [(a.kind, a.issue_key) for a in result] == [(sw.CREATE, "MPIT-2"),
+                                                          (sw.MOVE, "MPIT-3")]
+
+    def test_the_jira_comment_moves_with_it(self):
+        create = self._create("MPIT-2", 5, comment="timesheet draft")
+        [move] = sw.pair_moves([create, self._stray("MPIT-1", 5, comment="tidied")],
+                               update_comments=False)
+        assert move.allocation is not None and move.allocation.comment == "tidied"
+        assert move.note == "from MPIT-1, comment differs"
+
+        create = self._create("MPIT-2", 5, comment="timesheet draft")
+        [move] = sw.pair_moves([create, self._stray("MPIT-1", 5, comment="tidied")],
+                               update_comments=True)
+        assert move.allocation is not None and move.allocation.comment == "timesheet draft"
+
+
+class TestMoves:
+    def test_moved_allocation_moves_the_worklog(self, rig, capsys):
+        old = rig.mock.add_worklog("MPIT-1", ME, "2026-10-05T16:45:00.000+0100", 2700,
+                                   "tidied in Jira")
+        rig.write_export([("2", "2026-10-05", 0.75, "timesheet text")])
+        assert rig.run("plan") == sw.EXIT_OK
+        assert "1 to move" in capsys.readouterr().out
+        assert rig.run("apply", "--yes") == sw.EXIT_OK
+        assert rig.worklogs("MPIT-1") == []
+        [moved] = rig.worklogs("MPIT-2")
+        assert (moved["started"], moved["timeSpentSeconds"], moved["comment"]) == \
+            (old["started"], 2700, "tidied in Jira")
+        assert rig.run("verify") == sw.EXIT_OK
+
+        assert rig.run("undo", str(rig.last_journal()), "--yes") == sw.EXIT_OK
+        assert rig.worklogs("MPIT-2") == []
+        assert [w["comment"] for w in rig.worklogs("MPIT-1")] == ["tidied in Jira"]
+
+    def test_found_even_with_issue_filter(self, rig):
+        rig.mock.add_worklog("MPIT-1", ME, _bst("2026-10-05"), 3600, "work")
+        rig.write_export([("2", "2026-10-05", 1, "work"), ("3", "2026-10-06", 1, "other")])
+        assert rig.run("apply", "--yes", "--issue", "2") == sw.EXIT_OK
+        assert rig.worklogs("MPIT-1") == []
+        assert len(rig.worklogs("MPIT-2")) == 1
+        assert rig.worklogs("MPIT-3") == []
+
+    def test_entered_flag_doesnt_block_a_move(self, rig):
+        rig.mock.add_worklog("MPIT-1", ME, _bst("2026-10-05"), 3600, "work")
+        rig.write_export([("2", "2026-10-05", 1, "work")],
+                         entered=frozenset({("2", "2026-10-05")}))
+        assert rig.run("apply", "--yes") == sw.EXIT_OK
+        assert len(rig.worklogs("MPIT-2")) == 1
+
+    def test_failed_delete_is_explained_and_journalled(self, rig, monkeypatch, capsys):
+        rig.mock.add_worklog("MPIT-1", ME, _bst("2026-10-05"), 3600, "work")
+        rig.write_export([("2", "2026-10-05", 1, "work")])
+
+        def refuse(self, key, worklog_id, adjust):
+            raise sw.JiraError("DELETE -> 403 Forbidden", 403)
+
+        monkeypatch.setattr(sw.JiraClient, "delete_worklog", refuse)
+        assert rig.run("apply", "--yes") == sw.EXIT_JIRA
+        out = capsys.readouterr().out
+        assert "couldn't delete the old one" in out
+        assert len(rig.worklogs("MPIT-1")) == len(rig.worklogs("MPIT-2")) == 1
+        journal = rig.last_journal().read_text().splitlines()
+        assert json.loads(journal[-1])["op"] == "create"
+
+    def test_old_worklog_changed_while_waiting_stops(self, rig, monkeypatch, capsys):
+        rig.mock.add_worklog("MPIT-1", ME, _bst("2026-10-05"), 3600, "work")
+        rig.write_export([("2", "2026-10-05", 1, "work")])
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+        def meanwhile(prompt):
+            rig.worklogs("MPIT-1")[0]["timeSpentSeconds"] = 1800
+            return "yes"
+
+        monkeypatch.setattr("builtins.input", meanwhile)
+        assert rig.run("apply") == sw.EXIT_DIFFERENCES
+        assert "while waiting" in capsys.readouterr().out
+        assert rig.worklogs("MPIT-2") == []
+
+    def test_step_shows_and_can_skip_a_move(self, rig, monkeypatch, capsys):
+        rig.mock.add_worklog("MPIT-1", ME, _bst("2026-10-05"), 3600, "work")
+        rig.write_export([("2", "2026-10-05", 1, "work")])
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda prompt: "s")
+        assert rig.run("apply", "--yes", "--step") == sw.EXIT_OK
+        assert "then deletes worklog" in capsys.readouterr().out
+        assert len(rig.worklogs("MPIT-1")) == 1
+        assert rig.worklogs("MPIT-2") == []

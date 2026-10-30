@@ -164,6 +164,7 @@ Worked hours can be allocated to tickets (e.g., JIRA IDs) for billing reports.
 | --- | ------------------------------------------------------- |
 | `B` | Open billing view (current bill by deliverable)         |
 | `f` | Finalise the current bill (billing view)                |
+| `J` | Export a finalised bill for jira_sync (billing view)    |
 
 The billing view groups archived-and-unbilled tickets by deliverable
 and ceiling-rounds hours per deliverable bucket to give the truthful
@@ -262,13 +263,20 @@ deletion - the TUI keeps full control of those.
 
 ## Jira Worklog Sync
 
-[`jira_sync/`](jira_sync/README.md) holds a standalone tool that makes your
-worklogs in the client's Jira match a month of allocations, so they no longer
-need typing in by hand. Export the month with `R`, choosing **JSON for
-jira_sync**, then run the tool where Jira can be reached. It reconciles rather
-than appends, so it is safe to re-run, and it journals every change so it can
-be undone. See [jira_sync/README.md](jira_sync/README.md) for setup on the
-client site and a staged first run.
+[`jira_sync/`](jira_sync/README.md) holds a standalone tool, run on the
+client site, that does two jobs which used to be done by hand in the
+client's Jira:
+
+- **Worklogs:** export a month with `R`, choosing **JSON for jira_sync**,
+  and it makes your worklogs match the allocations.
+- **Bills:** export a finalised bill with `J` in the Billing view, and it
+  sets the story points on that month's deliverable tickets in the billing
+  project (0 for deliverables not on the bill) and links each one to the
+  work tickets behind its points.
+
+It reconciles rather than appends, so it is safe to re-run, and it journals
+every change so it can be undone. See [jira_sync/README.md](jira_sync/README.md)
+for setup on the client site and staged first runs.
 
 ## Multi-Machine Setup
 

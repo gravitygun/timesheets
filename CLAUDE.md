@@ -124,6 +124,11 @@ not (and should not) sum to the bill.
   as a dependency. `mock_jira.py` is its stdlib-only stand-in Jira, for tests
   and rehearsals. If the export's fields change meaning, bump
   `ALLOCATIONS_EXPORT_VERSION` and the tool's `EXPORT_VERSION` together.
+  It also reads the bill export (`storage.get_bill_export`, written by `J`
+  in the Billing view, finalised bills only): per-deliverable points plus
+  the tickets behind each line, used to set story points on the client's
+  billing-project tickets and link them. Its version pairs with the tool's
+  `BILL_VERSION` in the same way.
 - `import_data.py` - One-time import from Excel JSON (already run)
 - `tools/extract.py` - Excel extraction utility
 
