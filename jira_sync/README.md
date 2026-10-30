@@ -65,36 +65,21 @@ mapping is a config fix there, not a fresh export. See
 On the laptop, pack the tool and the exports together:
 
 ```bash
-jira_sync/bundle.sh ~/time-allocations-2026-09.json ~/time-allocations-2026-10.json
+jira_sync/bundle.sh ~/time-allocations-2026-10.json ~/bill-2026-10.json
 ```
 
-That writes two equivalent forms to `~/jira_sync-transfer/`. Send whichever
-the transfer route accepts:
-
-- `jira_sync-VERSION.zip`
-- `jira_sync-VERSION-txt/`: the same files with `.txt` appended
-
-Both include `SHA256SUMS`. The exports hold only ticket IDs, dates, hours,
-descriptions and the entered flag, with no rates or amounts.
+That writes `~/jira_sync-transfer/jira_sync-VERSION.zip`, including a
+`SHA256SUMS` file. The exports hold no rates or amounts. Allocations
+exports carry ticket IDs, dates, hours, descriptions and the entered flag.
+Bills carry points per deliverable and the tickets behind them.
 
 On HS, unpack and check that nothing changed on the way:
 
 ```bash
-unzip jira_sync-0.1.0.zip            # or: python3 -m zipfile -e jira_sync-0.1.0.zip .
-cd jira_sync-0.1.0
+unzip jira_sync-0.4.1.zip            # or: python3 -m zipfile -e jira_sync-0.4.1.zip .
+cd jira_sync-0.4.1
 sha256sum -c SHA256SUMS
 ```
-
-or, for the text files, drop the `.txt` first:
-
-```bash
-for f in *.txt; do mv "$f" "${f%.txt}"; done
-sha256sum -c SHA256SUMS
-```
-
-If the check fails after a text transfer, line endings were probably
-converted on the way. The tool still works, but note it in case anything
-else misbehaves.
 
 For later versions, replace the files in the same folder. Your config, token
 and journals live in `~/.jira-sync` and are untouched.

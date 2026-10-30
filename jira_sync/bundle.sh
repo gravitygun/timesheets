@@ -2,11 +2,9 @@
 #
 # Package jira_sync for carrying across to HS.
 #
-# Writes, into OUT_DIR (default ~/jira_sync-transfer):
-#   jira_sync-VERSION.zip   the tool, its docs and any exports given
-#   jira_sync-VERSION-txt/  the same files with .txt appended, for transfers
-#                           that only take text
-# Both include SHA256SUMS, so the far side can check nothing changed.
+# Writes jira_sync-VERSION.zip into OUT_DIR (default ~/jira_sync-transfer):
+# the tool, its docs and any exports given, with SHA256SUMS so the far side
+# can check nothing changed on the way.
 #
 # Usage: bundle.sh [-o OUT_DIR] [EXPORT.json ...]
 
@@ -71,18 +69,10 @@ main() {
 
   mkdir -p "${out_dir}"
   local zip_path="${out_dir}/${name}.zip"
-  local txt_dir="${out_dir}/${name}-txt"
-  rm -rf "${zip_path}" "${txt_dir}"
-
+  rm -f "${zip_path}"
   (cd "${stage}" && zip -q -X -r "${zip_path}" "${name}")
 
-  mkdir -p "${txt_dir}"
-  for f in "${included[@]}" SHA256SUMS; do
-    cp "${stage}/${name}/${f}" "${txt_dir}/${f}.txt"
-  done
-
   echo "Zip:       ${zip_path}"
-  echo "Txt files: ${txt_dir}/"
   echo "Contents:  ${included[*]} SHA256SUMS"
 }
 
